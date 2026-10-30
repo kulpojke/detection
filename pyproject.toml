@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["test"]
+markers = ["network: queries the public USGS EPT on S3 (slow; deselect with -m 'not network')"]
