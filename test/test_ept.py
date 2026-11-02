@@ -106,7 +106,7 @@ def test_cli_exec_seam(ept, site, tmp_path):
     single = gdal.Open(str(tmp_path / "one" / "dsm" / "site.tif")).ReadAsArray()
     assert mosaic.shape == single.shape == (500, 500)
     np.testing.assert_array_equal(mosaic, single)
-    assert (mosaic != -9999).mean() > 0.5
+    assert (mosaic != -9999).mean() > 0.9  # the site really is full of data
     with open(tmp_path / "grid" / "info.csv") as f:
         assert len(list(csv.DictReader(f))) == 4
 

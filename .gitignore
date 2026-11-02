@@ -1,0 +1,4 @@
+# Python bytecode, rebuilt automatically
+__pycache__/
+# pytest's cache of last-failed tests
+.pytest_cache/
