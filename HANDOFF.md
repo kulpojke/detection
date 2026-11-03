@@ -126,10 +126,11 @@ Run from the project root, inside a memory cap:
 - Conda env `tilestream` at `~/miniforge3/envs/tilestream`, recreated on 2026-10-30 with:
 
       mamba create -n tilestream -c conda-forge --override-channels python=3.12 pdal \
-          python-pdal gdal numpy scipy pyproj laspy lazrs-python pytest
+          python-pdal gdal numpy scipy scikit-image pyproj laspy lazrs-python pytest
 
   Versions: python 3.12, PDAL 2.10.2, python-pdal 3.5.5, GDAL 3.13.3, numpy 2.5.4,
-  scipy 1.18.1, pyproj 3.8.0, laspy 2.7.0 (with lazrs, for validation only), pytest 9.2.
+  scipy 1.18.1, scikit-image 0.26.0 (added 2026-11-02, for the watershed in buildings.py),
+  pyproj 3.8.0, laspy 2.7.0 (with lazrs, for validation only), pytest 9.2.
 - **`PYTHONNOUSERSITE=1` is needed.** `~/.local/lib/python3.12/site-packages` holds old
   `pip install --user` packages (pandas 2.3.3, scipy 1.16.2, geopandas, shapely, sklearn
   and more, from 2025-10-02). Every Python 3.12 searches that folder before its own

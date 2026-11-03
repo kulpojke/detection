@@ -29,7 +29,8 @@ def analyze(pts, w):
     x0, ytop, nx, ny = w.grid(RES)
     keep = (pts["ReturnNumber"] == 1) & ~np.isin(pts["Classification"], (7, 18))  # first returns, no noise
     col = ((pts["X"][keep] - x0) / RES).astype(np.int64)
-    row = ((ytop - pts["Y"][keep]) / RES).astype(np.int64)
+    # a point exactly on the grid's bottom edge would get row ny, one past the last row
+    row = np.minimum(((ytop - pts["Y"][keep]) / RES).astype(np.int64), ny - 1)
     dsm = np.full((ny, nx), -np.inf, np.float32)
     np.maximum.at(dsm, (row, col), pts["Z"][keep].astype(np.float32))
     empty = ~np.isfinite(dsm)

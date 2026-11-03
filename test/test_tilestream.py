@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import buildings
 import example_peaks as ex
 import tilestream as ts
 
@@ -208,10 +209,10 @@ def synthetic_points(bounds):
     xs, ys = xs[(xs >= x0) & (xs < x1)], ys[(ys >= y0) & (ys < y1)]
     X, Y = (v.ravel() for v in np.meshgrid(xs, ys))
     a = np.zeros(len(X), dtype=[("X", "f8"), ("Y", "f8"), ("Z", "f8"),
-                                ("Classification", "u1"), ("ReturnNumber", "u1")])
+                                ("Classification", "u1"), ("ReturnNumber", "u1"), ("NumberOfReturns", "u1")])
     a["X"], a["Y"] = X, Y
     a["Z"] = 600 + 0.05 * (X - 500000) + 10 * np.cos(2 * np.pi * X / 37) * np.cos(2 * np.pi * Y / 41)  # 5% slope
-    a["ReturnNumber"] = 1
+    a["ReturnNumber"] = a["NumberOfReturns"] = 1
     noise = (np.round(X / SPACING) * 7919 + np.round(Y / SPACING) * 104729) % 997 == 0  # by location, not index
     a["Classification"] = np.where(noise, 7, 1)  # noise points that analyses must drop
     a["Z"][noise] += 50
@@ -261,6 +262,42 @@ def test_run_merge_is_seamless(tmp_path, fake_ept, core):
     assert sorted(r["window"] for r in rows) == sorted(w.name for w in windows)
     assert list(rows[0]) == ["window", "xmin", "ymin", "xmax", "ymax", "n_peaks_in_core", "max_z"]
     assert sum(int(r["n_peaks_in_core"]) for r in rows) == len(peaks)
+
+
+@pytest.mark.parametrize("analysis", [ex, buildings])
+def test_point_on_grid_bottom_edge(analysis):
+    """A point exactly on the bottom edge of the grid lands in the last row instead of crashing."""
+    w, = ts.bbox_windows([(500000.0, 4000000.0, 500010.0, 4000010.0)], 0)
+    pts = synthetic_points(w.halo)
+    pts["Y"][0] = w.halo[1]  # the grid starts exactly here: halo 0, edge a multiple of RES
+    analysis.analyze(pts, w)
+
+
+def test_rectangularity():
+    """1 for a rectangle, nearly 1 for a rotated one (its edges are pixel steps), lower for other shapes."""
+    y, x = np.mgrid[-30:31, -30:31]
+
+    def score(mask):
+        return buildings.rectangularity(*np.nonzero(mask))
+
+    assert score((abs(x) <= 10) & (abs(y) <= 4)) == pytest.approx(1)
+    assert score((abs(x + y) <= 30) & (abs(x - y) <= 12)) > 0.9  # rotated 45 degrees
+    assert score((abs(x) <= 10) & (abs(y) <= 10) & ((x <= 0) | (y <= 0))) == pytest.approx(341 / 441)  # L shape
+    assert 0.7 < score(x ** 2 + y ** 2 <= 400) < 0.82  # disc: pi / 4 for a perfect one
+
+
+def test_segment_keeps_small_patch_next_to_tree():
+    """A 2 x 2 m patch half a metre from a taller tree has no tree top of its own (the tree is
+    higher within TREE_TOP_RADIUS), but it still becomes an object of its own."""
+    y, x = np.mgrid[0:30, 0:30]
+    ndsm = 15 - 2 * np.hypot(x - 12, y - 15)  # a cone-shaped tree, 3 m high at its edge, 6 pixels out
+    ndsm[ndsm < 3] = 0
+    ndsm[14:18, 20:24] = 2.5  # the patch, one empty pixel right of the tree
+    g = {"ndsm": ndsm.astype(np.float32), "ground_gap": np.zeros((30, 30), np.float32)}  # no holes: no roof seeds
+    segments, n_roofs = buildings.segment(g)
+    tree, patch = segments[15, 12], segments[15, 21]
+    assert n_roofs == 0 and tree > 0 and patch > 0 and tree != patch
+    assert set(np.unique(segments)) == {0, tree, patch}  # just these two objects
 
 
 def test_run_resumes_and_limits(tmp_path, fake_ept):
@@ -351,7 +388,7 @@ def test_exec_failure_stops_run_and_keeps_window_todo(tmp_path, fake_ept):
 
 
 def test_exec_example_dsm_is_seamless(tmp_path, fake_ept):
-    """example_dsm.sh over four 250 m windows mosaics identically to one 1000 x 500 m window."""
+    """example_dsm.sh over eight 250 m windows mosaics identically to one 1000 x 500 m window."""
     from osgeo import gdal
     halo = 5
     grid_out, single_out = tmp_path / "grid", tmp_path / "single"

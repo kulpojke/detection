@@ -336,7 +336,11 @@ def fetch_points(ept: str, bounds: Bounds, srs: str, dims: tuple[str, ...] | Non
             print(f"  ! EPT query failed ({str(e)[:120]}); retry {attempt + 1}/{retries} in {delay:.0f}s", flush=True)
             time.sleep(delay)
             delay = min(delay * 2, 300)
-    a = p.arrays[0] if p.arrays else np.empty(0, dtype=[("X", "f8"), ("Y", "f8"), ("Z", "f8")])
+    if p.arrays:
+        a = p.arrays[0]
+    else:  # no points: an empty array with the fields and types a full read would have
+        kind = {"floating": "f", "signed": "i", "unsigned": "u"}
+        a = np.empty(0, [(d["name"], f"{kind[d['type']]}{d['size']}") for d in p.schema["schema"]["dimensions"]])
     a = a[(a["X"] >= x0) & (a["X"] < x1) & (a["Y"] >= y0) & (a["Y"] < y1)]
     if dims:
         from numpy.lib import recfunctions as rfn

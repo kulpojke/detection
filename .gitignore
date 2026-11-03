@@ -2,3 +2,5 @@
 __pycache__/
 # pytest's cache of last-failed tests
 .pytest_cache/
+# links to test outputs in /tmp, for viewing in QGIS
+tmp_symlinks/

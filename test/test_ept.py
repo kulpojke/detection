@@ -46,6 +46,16 @@ def test_fetch_dims_keeps_only_requested_fields(ept, site):
     assert a.dtype.names == ("X", "Y", "Z") and a.dtype.itemsize == 24
 
 
+def test_fetch_empty_area_keeps_fields(ept, site):
+    """A box with no points gives an empty array with the fields of a full read, also with dims=."""
+    x0, y0, _, _ = ts.footprint(ept, site.srs)
+    empty = (x0 - 10_000, y0, x0 - 9_900, y0 + 100)  # 10 km west of all the data
+    a = ts.fetch_points(ept, empty, site.srs)
+    assert len(a) == 0 and a.dtype == ts.fetch_points(ept, small_box(site, 10), site.srs).dtype
+    a = ts.fetch_points(ept, empty, site.srs, dims=("X", "Y", "Z", "Classification"))
+    assert len(a) == 0 and a.dtype.names == ("X", "Y", "Z", "Classification")
+
+
 def test_fetch_resolution_thins(ept, site):
     n = {res: len(ts.fetch_points(ept, site.area, site.srs, dims=("X", "Y", "Z"), resolution=res))
          for res in (None, 2.0, 8.0)}
