@@ -1,7 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-03 (Claude, after step 4 of building detection: footprints, the
-building rule and its codes)._
+_Last updated 2026-11-03, evening (Claude, after the crowns layer, the point metrics and
+the `reclaim_roof` fixes)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -14,7 +14,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-03)
-- **Offline suite: 51 passed** (10 network tests skipped), in about 11 s.
+- **Offline suite: 55 passed** (10 network tests skipped), in about 12 s.
 - **The network suite was last run on 2026-10-30** (49 of 49). Since then `fetch_points`
   got the empty-area fix (`test_fetch_empty_area_keeps_fields`), and tilestream got the
   GeoPackage output. Run the full suite once (see Tests).
@@ -22,8 +22,9 @@ building logic goes into it.
   - an analysis can return polygons (features), which become GeoPackages;
   - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
 - **buildings.py:** steps 1–4c are done. It writes footprint polygons with a `building`
-  code. See "Building detection".
-- Last commit before this work: 26abb17, pushed to https://github.com/kulpojke/detection.
+  code, crown polygons, and metrics per object from the points (heights, cover,
+  intensity). See "Building detection".
+- Repository: https://github.com/kulpojke/detection.
 - Earlier (2026-10-30), for reference:
   - The network test-site finder (`test/conftest.py`) picks the 500 m square at
     (445000, 5300000) in EPSG:6340. There, full density is 28.3 pts/m², 3.9 at
@@ -130,17 +131,40 @@ under a building the ground is filled in from around it.
 
   Patches without a seed get one at their highest pixel. Afterwards `reclaim_roof()`
   gives "tree" pixels that are really roof to the nearest roof:
+  - whole "tree" objects touching a roof with fewer split pulses than `ROOF_MULTI` (0.15):
+    roof sections and roof edges where a tree top landed;
   - thin pieces touching a roof (eaves, ridges), found with an opening using a 1 m disk;
   - tree patches with roof all around (rooftop units).
+
+  Then every tree object is made one piece again. The opening can cut an object in parts:
+  - the part with its top keeps the label;
+  - a cut-off part next to the (original) roof goes to the roof;
+  - any other cut-off part becomes an object of its own.
+
+  Before this fix, Chewelah had 11 crowns that were multipolygons.
 - **`objects`** (table): one row per object, with these features:
   - `area`, `height`, `hole_depth`, `hole_share`, `rectangularity`, `multi_return`;
   - `roughness`, and `roughness_inside` (the same without the edge pixels: on a small
     object, half the pixels are edge, where the Laplacian sees the drop to the ground);
+  - with `POINT_METRICS = True`, metrics from the object's points:
+    - `n_points`;
+    - `top`, `h_mean`, `h_std`, `h_p50`, `h_p95`: the returns above 2 m;
+    - `cover`: the share of first returns above 2 m;
+    - `i_mean`, `i_std`: the intensity of the first returns above 2 m.
+
+    This needs `Intensity`; tilestream reads every field unless `--dims` says otherwise.
+    Heights are sorted per object before summing, so the result doesn't depend on point
+    order, which can differ per window;
   - `building` (see below).
 - **`footprints`** (GeoPackage): every roof-seeded object as a polygon, with the same
   columns. Rejects stay in the layer, so you can see them in QGIS. Outlines come from
   `gdal.Polygonize` and are simplified (0.5 m) only for objects of at least 25 m².
-- **The rule, `is_building()`:** over the whole object, it needs all of:
+- **`crowns`** (GeoPackage): every object with `building` = 0 of at least 5 m²
+  (`CROWN_MIN_AREA`), with `roof_seed` in place of `building`. `roof_seed` = 1 is a reject
+  that is also in `footprints`; most of those are trees. Smaller tree objects are mostly loose
+  bits just over 2 m: in Nine Mile 44% of the tree objects, but 1% of their area.
+- **The rule, `is_building()`:** only roof-seeded objects can be buildings. Over the whole
+  object, it needs all of:
   - split pulses < 0.35;
   - `roughness_inside` < 0.5 (< 0.3 for objects under 25 m²: sheds have simple roofs,
     bushes don't);
@@ -155,23 +179,33 @@ under a building the ground is filled in from around it.
   - a rock at (457380, 5292240), which the rule rejects (rough inside);
   - a 7.5 m² shed at (457368, 5292215);
   - a tree crown that got a roof seed at (457059, 5291980), which the rule rejects.
-- **Last results** (2026-11-03):
-  - Chewelah: 181 footprints (114 buildings, 45 small structures, 22 not).
-  - Nine Mile: 6 footprints (3, 1, 2).
-  - Four 250 m windows give exactly the same rasters, objects and footprints as one
-    500 m window. This was checked by hand; there is no automatic real-data seam test
-    for buildings.py yet.
+- **Last results** (2026-11-03, evening):
+  - Chewelah: 181 footprints (114 buildings, 45 small structures, 22 not) and 372 crowns.
+  - Nine Mile: 6 footprints (3, 1, 2) and 2,618 crowns (median 46 m², 22.6 m high).
+  - Four 250 m windows give exactly the same rasters, objects, footprints and crowns (all
+    columns) as one 500 m window. This was checked by hand; there is no automatic
+    real-data seam test for buildings.py yet.
 - **Known limits:**
   - Vehicles, containers and dumpsters look like sheds from above (code 2).
   - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
     thinner than ~2.5 m. Example: the house at (446776, 5347492).
   - Thin things sticking out of a wall can become little roof spikes.
   - Big diagonal outlines grow ~8%, because simplifying keeps the outer staircase corners.
-  - Big tree crowns are split into several pieces.
-  - A building without a roof seed is missed (`missed_building`).
+  - **Buildings without a roof seed are missed;** they end up in `crowns`. Examples in
+    Chewelah: (447148, 5347158), (446796, 5347161), `missed_building`.
+  - A roof part touching a building with 0.15–0.35 split pulses stays a "crown"; only
+    parts under 0.15 are merged into the roof.
+  - A few footprints have a one-pixel part that touches the roof only at a corner.
+  - Neighbouring crowns are simplified one by one, so their shared edges can differ a
+    little.
 - **Decisions:**
   - The minimum building area stays 4 m². 8 m² was considered, to drop vehicles and
     dumpsters, but the checked shed is 7.5 m².
+  - Crowns are not split into too many pieces. In Nine Mile, only 0–1% of neighbouring
+    crowns have a saddle less than 1 m deep. The mean-filter idea (smooth the crown pixels,
+    then a second watershed) was set aside: tried at 0.5–1.5 m, it barely changed anything.
+  - **The rule applies only to roof-seeded objects.** Applying it to all objects ("option
+    a") was tried and rejected: in Chewelah it added 26 footprints, many of them trees.
 
 ## Tests
 Run from the project root, inside a memory cap:
@@ -182,7 +216,7 @@ Run from the project root, inside a memory cap:
 
 `test/README.md` explains every test, and how to check that a new test fails without its fix.
 
-- **`test/test_tilestream.py`** (offline, 51 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 55 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -191,8 +225,9 @@ Run from the project root, inside a memory cap:
   - cropping rasters, GeoTIFFs and CSVs
   - run, merge, resume, settings guard, empty-window skipping
   - GeoPackage output and codes, through merge
-  - buildings.py: segmentation, `reclaim_roof`, outlines, `roughness_inside`, the rule
-    and the codes
+  - buildings.py: segmentation, `reclaim_roof` (each step, and objects in one piece),
+    outlines, `roughness_inside`, point metrics (independent of point order), the rule,
+    the codes, and the whole `analyze()` on a synthetic scene (which layer gets what)
   - the `--exec` contract (arguments, environment variables, PATH, output handling, failure)
   - seam tests for both the Python analysis and `example_dsm.sh`
 - **`test/test_ept.py`** (marked `network`, skipped without `--ept`): no hardcoded
@@ -244,20 +279,20 @@ Run from the project root, inside a memory cap:
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 
 ## Next steps
-1. **Tree crowns.** Michael wants crown polygons too, but first fewer artificially split
-   crowns. His idea:
-   - take the crown pixels of the dsm;
-   - apply a mean filter over crown pixels only;
-   - find the tops and run the watershed again, inside the crowns.
+1. Run the full network suite once (not run since 2026-10-30).
+2. Buildings without a roof seed. Two ways to tackle it:
+   - find out why they get no seed;
+   - or use a much stricter rule for seedless objects only, e.g. split pulses < 0.15. The
+     examples have 0.06–0.10.
 
-   Plan: first measure the splitting in Nine Mile, then try 2–3 filter sizes side by
-   side, then build it into `segment()`. The crowns then get a code or a layer of their own.
-2. Run the full network suite once (not run since 2026-10-30).
+   Ask Michael for a few of the trees from the rejected run, to see what tells them apart.
 3. Later for buildings:
    - straighten outlines (4d);
    - a real-data seam test for buildings.py (a network test);
    - a clue for vehicles and containers (context, or a second scan);
    - the `reclaim_roof` thin-neck case.
+   - Point metrics are on by a constant (`POINT_METRICS`). In a final command-line version
+     they might become an option; tilestream has no way yet to pass options to an analysis.
 4. Decide the permanent fix for the `~/.local` packages (see Environment).
 5. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
    then go larger (`--list` or `--all`, in chunks or overnight). Measure memory first for

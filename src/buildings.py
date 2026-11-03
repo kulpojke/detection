@@ -29,8 +29,10 @@ by a watershed on the ndsm. The flood starts from two kinds of seeds:
               building also hides the ground, and must not end up in the roof.
   tree tops   local maxima of the lightly smoothed ndsm, away from the roof seeds
 Each high pixel joins the seed it is "downhill" from, so boundaries fall in the valleys
-between crowns and roofs. Then tree pixels that are really roof go to the nearest roof: thin
-pieces next to a roof (eaves, ridges) and tree patches with roof all around them (rooftop units).
+between crowns and roofs. Then tree pixels that are really roof go to the nearest roof: whole
+"tree" objects next to a roof with few split pulses (roof sections where a tree top landed),
+thin pieces next to a roof (eaves, ridges) and tree patches with roof all around them (rooftop
+units). Every tree object stays in one piece.
 
 Table "objects": one row per object of at least MIN_AREA. Its point (x, y) is inside the
 object (a roof's pixel furthest from any ground point, a tree's top); the window holding that
@@ -41,7 +43,9 @@ point keeps the row. Columns:
   roughness (median), roughness_inside (median without the object's edge pixels: at the edge
   the Laplacian sees the drop to the ground, and on a small object half the pixels are edge),
   building (the rule's verdict, CODES: 0 = not a building, 1 = building, 2 = shed, container
-  or RV, a building under SMALL_STRUCTURE)
+  or RV, a building under SMALL_STRUCTURE), and with POINT_METRICS the metrics from the
+  object's points: n_points, top, h_mean, h_std, h_p50, h_p95, cover, i_mean, i_std (see
+  point_metrics)
 
 Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the same columns
 (without roof_seed). The outline follows the object's pixel edges, with pixel staircases
@@ -49,7 +53,13 @@ simplified away (SIMPLIFY; not for objects under SIMPLIFY_MIN_AREA). A footprint
 seen from above: eaves included, parts under overhanging trees missing. The meaning of the
 building codes is stored in the file (a coded field domain), so QGIS shows the labels.
 
-Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns.
+Layer "crowns" (GeoPackage): the objects that aren't buildings (building = 0) of at least
+CROWN_MIN_AREA, as polygons in the same way, with the same columns (without building). Mostly
+tree crowns. roof_seed = 1 marks a roof-seeded object the rule rejected: it is in footprints
+too. Neighbouring crowns are simplified one by one, so their shared edges can differ a little.
+
+Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns, and Intensity
+for POINT_METRICS (tilestream reads all fields unless --dims says otherwise).
 
     python src/tilestream.py run out/ --ept WA_NorthEast_2_B22 --bbox XMIN YMIN XMAX YMAX \\
         --analysis src/buildings.py
@@ -58,6 +68,7 @@ Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns.
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import ConvexHull
+from skimage import measure
 from skimage.segmentation import watershed
 
 from tilestream import Raster
@@ -85,6 +96,10 @@ BUILDING_ROUGH_SMALL = 0.3  # a shed's simple roof is smoother (0.05-0.15) than 
 BUILDING_AREA = 4.0     # and an area of at least this (m^2; a 2 x 3 m shed is 6 m^2)
 SMALL_STRUCTURE = 40    # m^2: a smaller building is a shed, container or RV (40 ft container 30 m^2, big RV 35)
 CODES = {"footprints": {"building": {0: "not a building", 1: "building", 2: "shed, container or RV"}}}
+POINT_METRICS = True    # per-object metrics from the points (heights, cover, intensity; see
+                        # point_metrics). Needs the Intensity field.
+CROWN_MIN_AREA = 5.0    # m^2: smaller tree objects are mostly loose bits just over MIN_HEIGHT (shrubs,
+                        # snags): in Nine Mile Falls 44% of the tree objects, but 1% of their area
 GROUND = 2
 NOISE = (7, 18)         # low and high noise
 FEATURES = ("area", "height", "hole_depth", "hole_share", "rectangularity", "multi_return", "roughness",
@@ -123,12 +138,22 @@ def analyze(pts, w):
     out = {name: Raster(r, x0, ytop, RES, nodata=np.nan) for name, r in layers.items()}
     out["segments"] = Raster(segment_map(segments, n_roofs), x0, ytop, RES, nodata=0)
     out["objects"], labels = objects_table(segments, n_roofs, grids, x0, ytop)
-    out["objects"]["building"] = building_code(out["objects"])
-    # footprints: the roof-seeded rows again, with an outline
-    roof = out["objects"]["roof_seed"] == 1
-    shapes = outlines(np.where(segments <= n_roofs, segments, 0), x0, ytop)
-    out["footprints"] = {**{k: v[roof] for k, v in out["objects"].items() if k != "roof_seed"},
-                         "geometry": np.array([shapes[i] for i in labels[roof]])}
+    t = out["objects"]
+    if POINT_METRICS:
+        h = pts["Z"][keep] - dtm.ravel()[pixel[keep]]  # height above the ground
+        t.update(point_metrics(h, pts["ReturnNumber"][keep] == 1, pts["Intensity"][keep],
+                               segments.ravel()[pixel[keep]], labels))
+    t["building"] = building_code(t)
+    # two polygon layers: footprints = the roof-seeded rows, crowns = the rows that aren't buildings.
+    # Most roof-seeded rejects are crowns too, so they are in both until we trust the rule.
+    roof = t["roof_seed"] == 1
+    crown = (t["building"] == 0) & (t["area"] >= CROWN_MIN_AREA)
+    shapes = outlines(np.where(np.isin(segments, labels[roof | crown]), segments, 0), x0, ytop)
+
+    def layer(rows, drop):  # the table's rows, without a column that is the same in every row
+        return {**{k: v[rows] for k, v in t.items() if k != drop}, "geometry": np.array([shapes[i] for i in labels[rows]])}
+    out["footprints"] = layer(roof, "roof_seed")
+    out["crowns"] = layer(crown, "building")
     return out
 
 
@@ -172,34 +197,60 @@ def segment(g):
     for k, rc in enumerate(ndimage.maximum_position(g["ndsm"], patches, unseeded), markers.max() + 1):
         markers[rc] = k
     segments = watershed(np.where(high, -g["ndsm"], 0), markers, mask=high)
-    return reclaim_roof(segments, n_roofs), n_roofs
+    return reclaim_roof(segments, n_roofs, g), n_roofs
 
 
-def reclaim_roof(segments, n_roofs):
+def reclaim_roof(segments, n_roofs, g):
     """Give the tree pixels that are really roof to the nearest roof:
+      - whole tree objects next to a roof with, as a whole, few split pulses (below ROOF_MULTI):
+        roof sections and roof edges where a tree top landed, so the flood made them a "tree".
       - thin pieces next to a roof. Eaves, ridges and steps between roof sections look like trees
         (split pulses, sharp bends), and a crown can flood along them deep into a roof. An erosion
         followed by a dilation (an opening) with a disk of radius THIN keeps only the tree pixels
         the disk fits in, so it finds every piece narrower than ~2.5 m.
       - tree patches with roof all around them: rooftop units and raised parts of a building are
         too wide for the opening, but a real tree reaches past the roof edge somewhere, down to
-        lower ground."""
+        lower ground.
+    Taking the thin pieces can cut a tree object in parts. The part with its top keeps the
+    label; another part goes to the roof if it touches one, or else becomes an object of its own."""
     if n_roofs == 0:
         return segments
     trees = segments > n_roofs
     roof = (segments > 0) & ~trees
+    # the row and column of each pixel's nearest roof pixel
+    _, (r, c) = ndimage.distance_transform_edt(~roof, return_indices=True)
+    size = segments.max() + 1
+    with np.errstate(invalid="ignore", divide="ignore"):  # no pulses: NaN, not roof-like
+        roof_like = (np.bincount(segments.ravel(), g["split"].ravel(), size)
+                     / np.bincount(segments.ravel(), g["pulses"].ravel(), size)) < ROOF_MULTI
+    touching = np.zeros(size, bool)
+    touching[segments[trees & ndimage.binary_dilation(roof)]] = True
+    take = trees & (roof_like & touching)[segments]  # whole roof-like objects next to a roof
+    roof |= take
+    rest = trees & ~take
     k = round(THIN / RES)
     disk = np.hypot(*np.mgrid[-k:k + 1, -k:k + 1]) <= k
-    thin = trees & ~ndimage.binary_opening(trees, disk)
+    thin = rest & ~ndimage.binary_opening(rest, disk)
     pieces, _ = ndimage.label(thin)
-    take = np.isin(pieces, pieces[thin & ndimage.binary_dilation(roof)])  # the pieces touching a roof
+    take |= np.isin(pieces, pieces[thin & ndimage.binary_dilation(roof)])  # the pieces touching a roof
     rest = trees & ~take
     patches, _ = ndimage.label(rest)
     reach_ground = np.isin(patches, patches[rest & ndimage.binary_dilation(segments == 0)])
     take |= rest & ~reach_ground  # patches that touch no lower ground: roof all around
-    # the row and column of each pixel's nearest roof pixel
-    _, (r, c) = ndimage.distance_transform_edt(~roof, return_indices=True)
     segments[take] = segments[r[take], c[take]]
+
+    # each tree object in one piece again: the part with its top (highest pixel) keeps the label
+    trees = segments > n_roofs
+    parts = measure.label(np.where(trees, segments, 0), connectivity=1)  # connected parts of one label
+    tops = ndimage.maximum_position(g["ndsm"], segments, np.unique(segments[trees]))
+    main = np.zeros(parts.max() + 1, bool)
+    main[[parts[p] for p in tops]] = True
+    cut = trees & ~main[parts]
+    # a cut-off part next to a roof (the roof before the thin pieces: not just the piece that was cut)
+    to_roof = cut & np.isin(parts, parts[cut & ndimage.binary_dilation(roof)])
+    segments[to_roof] = segments[r[to_roof], c[to_roof]]
+    alone = cut & ~to_roof
+    segments[alone] = segments.max() + parts[alone]  # new labels, past all the others
     return segments
 
 
@@ -227,10 +278,48 @@ def is_building(t):
     crown its pulses split and it is rough. Roughness is measured inside the object: a shed's
     flat roof is smooth there, a rock (a dome) or a bush isn't. Small objects must be smoother:
     a shed has a simple roof, while big buildings have ridges, vents and units.
+    (Judging objects without a roof seed too was tried on 2026-11-03: in Chewelah it turned
+    many trees into buildings.)
     NaN (no pulses, no inside) fails the test."""
     rough_max = np.where(t["area"] < BUILDING_SMALL, BUILDING_ROUGH_SMALL, BUILDING_ROUGH)
     return ((t["roof_seed"] == 1) & (t["multi_return"] < BUILDING_MULTI)
             & (t["roughness_inside"] < rough_max) & (t["area"] >= BUILDING_AREA))
+
+
+def point_metrics(h, first, intensity, label, rows):
+    """POINT_METRICS of the objects ``rows`` (their labels), from the points in their pixels:
+    ``h`` is each point's height above the ground, ``first`` whether it is a first return,
+    ``label`` the object its pixel belongs to (0 = none).
+      n_points                          all returns
+      top, h_mean, h_std, h_p50, h_p95  heights of the returns above MIN_HEIGHT: the crown or the
+                                        roof, not what lies under it
+      cover                             share of the first returns that are above MIN_HEIGHT
+      i_mean, i_std                     intensity of the first returns above MIN_HEIGHT
+    The points can arrive in another order in each window. So the heights are sorted per object
+    before they are summed, and intensities are whole numbers, whose sums are exact in any order."""
+    size = max(label.max(initial=0), rows.max(initial=0)) + 1
+    up = h > MIN_HEIGHT
+
+    def per_object(m, weights=None):  # count (or sum of weights) per label, of the points in m
+        return np.bincount(label[m], None if weights is None else weights[m], minlength=size)[rows]
+
+    i = intensity.astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):  # objects without such points get NaN
+        n_i = per_object(first & up)
+        i_mean = per_object(first & up, i) / n_i
+        out = {"n_points": per_object(np.ones(len(h), bool)).astype(np.int64),
+               "cover": n_i / per_object(first),
+               "i_mean": i_mean,
+               "i_std": np.sqrt(np.maximum(per_object(first & up, i * i) / n_i - i_mean ** 2, 0))}
+    order = np.lexsort((h[up], label[up]))  # by object, then by height
+    hs, ls = h[up][order], label[up][order]
+    heights = {k: np.full(len(rows), np.nan) for k in ("top", "h_mean", "h_std", "h_p50", "h_p95")}
+    for j, (a, b) in enumerate(zip(np.searchsorted(ls, rows), np.searchsorted(ls, rows, side="right"))):
+        if b > a:
+            v = hs[a:b]
+            heights["top"][j], heights["h_mean"][j], heights["h_std"][j] = v[-1], v.mean(), v.std()
+            heights["h_p50"][j], heights["h_p95"][j] = np.percentile(v, [50, 95])
+    return {"n_points": out.pop("n_points"), **heights, **out}
 
 
 def building_code(t):

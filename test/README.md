@@ -147,10 +147,33 @@ Two helpers make the fake lidar:
   the roof edge (an eave; the opening removes it) and a 3 x 3 m patch with roof all around
   it (a rooftop unit). A crown hanging over the roof edge stays a tree (but for a few pixels
   at its pointed edge), and so does a thin hedge that doesn't touch the roof.
+- `test_reclaim_roof_roof_like_object`: a whole "tree" object against a roof with few split
+  pulses (0.1, below `ROOF_MULTI`) is a roof section where a tree top landed: it goes to the
+  roof. A crown against the other side, with many split pulses, stays a tree.
+- `test_reclaim_roof_keeps_objects_whole`: two "trees" flooded along the roof's edges from a
+  top beside the roof. The strips go to the roof, which cuts each object in parts. The part
+  with the top keeps the label; a cut-off part next to the roof goes to the roof; one that
+  only touches the strip (now roof) becomes an object of its own. Every object ends up in one
+  piece. Before the fix, such objects became multipolygons in `crowns.gpkg` (fid 364 in
+  Chewelah: three parts of a roof's edge).
 - `test_outlines`: a 2 x 3 m shed's outline is exactly its 4 pixel-edge corners, in map
   coordinates. A 54 m² rectangle turned 45 degrees loses its pixel staircase, with about the
   same area. A 15 m² one (under `SIMPLIFY_MIN_AREA`) keeps its exact staircase: simplified,
   it grew 15%, because simplifying keeps the outer corners of a staircase.
+
+- `test_analyze_layers`: the whole `analyze()` on synthetic points (`scene_points`): one
+  pulse every 0.25 m over flat ground, with a house (flat roof), a tree (a cone whose pulses
+  split and also reach the ground), a smooth dome (a "rock") and a tiny bush. The house is a
+  footprint with code 1, the tree a crown. The rock gets a roof seed but the rule rejects it
+  (rough inside), so it is in both layers (`building` 0, `roof_seed` 1). The bush is an
+  object but too small for a crown. The tree's polygon lies around its top, with about the
+  cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
+  its intensity), and the tree's `top` is its highest point, with its own intensity.
+- `test_point_metrics`: heights, cover and intensity per object from a handful of points,
+  including a return under `MIN_HEIGHT` (counts for `cover`, not for heights), a second
+  return (counts for heights, not for intensity), and an object with nothing above
+  `MIN_HEIGHT` (NaN). Shuffled points give exactly the same result: the points can arrive in
+  another order in each window.
 
 **--exec analyses** (a shell command per window instead of a Python function)
 - `test_exec_contract`: what the command gets. The arguments are its own, then the LAZ

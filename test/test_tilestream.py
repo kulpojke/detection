@@ -208,9 +208,9 @@ def synthetic_points(bounds):
     ys = (np.arange(np.floor(y0 / SPACING) - 1, np.ceil(y1 / SPACING) + 1) + 0.5) * SPACING
     xs, ys = xs[(xs >= x0) & (xs < x1)], ys[(ys >= y0) & (ys < y1)]
     X, Y = (v.ravel() for v in np.meshgrid(xs, ys))
-    a = np.zeros(len(X), dtype=[("X", "f8"), ("Y", "f8"), ("Z", "f8"),
+    a = np.zeros(len(X), dtype=[("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"),
                                 ("Classification", "u1"), ("ReturnNumber", "u1"), ("NumberOfReturns", "u1")])
-    a["X"], a["Y"] = X, Y
+    a["X"], a["Y"], a["Intensity"] = X, Y, 100
     a["Z"] = 600 + 0.05 * (X - 500000) + 10 * np.cos(2 * np.pi * X / 37) * np.cos(2 * np.pi * Y / 41)  # 5% slope
     a["ReturnNumber"] = a["NumberOfReturns"] = 1
     noise = (np.round(X / SPACING) * 7919 + np.round(Y / SPACING) * 104729) % 997 == 0  # by location, not index
@@ -349,6 +349,25 @@ def test_is_building():
     assert buildings.building_code(t).tolist() == [1, 2, 0, 0, 0, 1, 0, 0, 0]
 
 
+def test_point_metrics():
+    """Metrics from each object's points, the same whatever order the points come in (it can
+    differ between windows)."""
+    #                   object 1: four first returns, one under MIN_HEIGHT, a second return   2      none
+    h = np.array([3, 4, 5, 6, 1, 2.5, 1, 9])
+    first = np.array([1, 1, 1, 1, 1, 0, 1, 1], bool)
+    intensity = np.array([10, 20, 30, 40, 99, 5, 7, 8], np.uint16)
+    label = np.array([1, 1, 1, 1, 1, 1, 2, 0])
+    m = buildings.point_metrics(h, first, intensity, label, np.array([1, 2]))
+    assert m["n_points"].tolist() == [6, 1]
+    assert m["top"][0] == 6 and m["h_mean"][0] == pytest.approx(4.1) and m["h_p50"][0] == 4  # 2.5, 3, 4, 5, 6
+    assert m["h_p95"][0] == pytest.approx(5.8) and m["h_std"][0] == pytest.approx(np.std([2.5, 3, 4, 5, 6]))
+    assert m["cover"][0] == 4 / 5 and m["i_mean"][0] == 25 and m["i_std"][0] == pytest.approx(np.std([10, 20, 30, 40]))
+    assert m["cover"][1] == 0 and np.isnan(m["top"][1]) and np.isnan(m["i_mean"][1])  # nothing above MIN_HEIGHT
+    o = np.random.default_rng(0).permutation(len(h))
+    shuffled = buildings.point_metrics(h[o], first[o], intensity[o], label[o], np.array([1, 2]))
+    assert all(np.array_equal(m[k], shuffled[k], equal_nan=True) for k in m)
+
+
 def test_describe_roughness_inside():
     """On a small object half the pixels are edge pixels, where the Laplacian sees the drop to the
     ground. Inside, a shed's flat roof is smooth, but a rock (a dome) is not."""
@@ -379,10 +398,51 @@ def test_reclaim_roof():
     crown = np.hypot(x - 27, y - 15) <= 5  # a 5 m crown over its right edge
     seg[crown] = 4
     seg[34:36, 5:30] = 5  # a 1 m hedge, 2 m from the roof
-    out = buildings.reclaim_roof(seg.copy(), 1)
+    out = buildings.reclaim_roof(seg.copy(), 1, tree_like(seg))
     assert (out[5:30, 3:5] == 1).all() and (out[14:20, 12:18] == 1).all()  # strip and unit are roof now
     assert np.sum(out[crown] != 4) <= 4  # pixels at the crown's pointed edge, next to the roof, may go
     assert (out[34:36, 5:30] == 5).all()
+
+
+def tree_like(seg, split=None):
+    """Grids for reclaim_roof: every pulse splits (unless ``split`` says otherwise), and the
+    height is the same everywhere."""
+    ones = np.ones(seg.shape)
+    return {"split": ones if split is None else split, "pulses": ones, "ndsm": ones}
+
+
+def test_reclaim_roof_roof_like_object():
+    """A whole "tree" object next to a roof with few split pulses is a roof section (a tree top
+    landed on it): it goes to the roof. A real crown next to it, with many split pulses, stays."""
+    seg = np.zeros((30, 40), np.int32)
+    seg[5:25, 10:30] = 1  # the roof
+    seg[5:12, 3:10] = 2  # 3.5 x 3.5 m against its left edge: few split pulses
+    seg[15:22, 30:37] = 3  # the same against its right edge: many split pulses
+    split = np.where(seg == 2, 0.1, 0.5)
+    out = buildings.reclaim_roof(seg.copy(), 1, tree_like(seg, split))
+    # the crown's middle stays (its corner pixels next to the roof go with the opening, as above)
+    assert (out[seg == 2] == 1).all() and (out[17:20, 32:36] == 3).all()
+
+
+def test_reclaim_roof_keeps_objects_whole():
+    """Two "trees" that flooded along the roof's edges, each from a top beside the roof. The thin
+    strips go to the roof, which cuts each object in parts. The part with the top keeps the
+    label. A cut-off part next to the roof goes to the roof; one that only touches the strip
+    (now roof) becomes an object of its own. Every object ends up in one piece."""
+    from scipy import ndimage
+    seg = np.zeros((40, 45), np.int32)
+    seg[5:35, 12:28] = 1  # the roof
+    seg[2:9, 4:11] = seg[9:31, 10:12] = seg[28:35, 5:12] = 2  # top part, 1 m strip on the left edge, end part
+    seg[2:9, 30:37] = seg[2:23, 28:30] = seg[21:23, 30:34] = seg[18:25, 34:41] = 3  # top part, strip, neck, end part
+    ndsm = np.ones(seg.shape)
+    ndsm[5, 7] = ndsm[5, 33] = 8  # the tops
+    g = {**tree_like(seg), "ndsm": ndsm}
+    out = buildings.reclaim_roof(seg.copy(), 1, g)
+    assert out[5, 7] == 2 and out[5, 33] == 3  # the parts with the tops
+    assert (out[12:27, 10:12] == 1).all() and (out[29:34, 6:11] == 1).all()  # strip and end part on the left
+    end = out[19:24, 35:40]
+    assert len(np.unique(end)) == 1 and end[0, 0] not in (0, 1, 2, 3)  # the right end part: an object of its own
+    assert all(ndimage.label(out == k)[1] == 1 for k in np.unique(out[out > 1]))
 
 
 def test_outlines():
@@ -402,6 +462,52 @@ def test_outlines():
     # big: straight edges, and about the same area
     assert shapes[3].GetGeometryRef(0).GetPointCount() <= 9
     assert shapes[3].GetArea() == pytest.approx(np.sum(labels == 3) * 0.25, rel=0.1)
+
+
+def scene_points():
+    """One pulse every 0.25 m over a 40 x 40 m square of flat ground (z = 0), with a 10 x 12 m
+    house (a flat roof, 4 m), a tree (a cone, 12 m at the top, 8 m across; its pulses split and
+    also reach the ground), a smooth dome (a "rock", 4 m high) and a 1 x 1.5 m bush (3 m)."""
+    s = 0.25
+    x, y = (v.ravel() for v in np.meshgrid(np.arange(1000 + s / 2, 1040, s), np.arange(2000 + s / 2, 2040, s)))
+    house = (abs(x - 1010) < 5) & (abs(y - 2028) < 6)
+    d_tree, d_rock = np.hypot(x - 1030, y - 2030), np.hypot(x - 1012, y - 2008)
+    tree, rock = d_tree < 4, d_rock < 3
+    bush = (abs(x - 1030) < 0.5) & (abs(y - 2010) < 0.75)
+    pts = np.zeros(len(x), [("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"), ("Classification", "u1"),
+                            ("ReturnNumber", "u1"), ("NumberOfReturns", "u1")])
+    pts["X"], pts["Y"] = x, y
+    pts["Z"] = np.select([house, tree, rock, bush], [4, 12 - 2.5 * d_tree, 4 * (1 - (d_rock / 3) ** 2), 3], 0)
+    pts["Intensity"] = np.select([house, tree], [200, 300], 100)
+    pts["Classification"] = np.where(house | tree | rock | bush, 1, 2)
+    pts["ReturnNumber"], pts["NumberOfReturns"] = 1, np.where(tree | bush, 2, 1)
+    ground = pts[tree | bush].copy()  # the second return of a split pulse
+    ground["Z"], ground["Classification"], ground["ReturnNumber"], ground["Intensity"] = 0, 2, 2, 50
+    return np.concatenate([pts, ground])
+
+
+def test_analyze_layers():
+    """The house is a footprint (a building), the tree a crown. The rock gets a roof seed but
+    the rule rejects it (rough inside), so it is in both layers. The bush is too small for a crown."""
+    from osgeo import ogr
+    w = ts.Window("scene", (1000, 2000, 1040, 2040), (1000, 2000, 1040, 2040))
+    out = buildings.analyze(scene_points(), w)
+    near = lambda t, x, y: np.flatnonzero(np.hypot(t["x"] - x, t["y"] - y) < 2)
+    fp, cr = out["footprints"], out["crowns"]
+    house, rock = near(fp, 1010, 2028), near(fp, 1012, 2008)
+    assert len(fp["x"]) == 2 and fp["building"][house] == 1 and fp["building"][rock] == 0
+    tree, rock_crown = near(cr, 1030, 2030), near(cr, 1012, 2008)
+    assert len(cr["x"]) == 2 and cr["roof_seed"][tree] == 0 and cr["roof_seed"][rock_crown] == 1
+    assert "building" not in cr and "roof_seed" not in fp
+    assert len(near(out["objects"], 1030, 2010)) == 1  # the bush is an object, but no crown
+    crown = ogr.CreateGeometryFromWkt(cr["geometry"][tree[0]])
+    assert crown.Contains(ogr.CreateGeometryFromWkt("POINT (1030 2030)"))  # around the tree's top
+    assert crown.GetArea() == pytest.approx(np.pi * 4 ** 2, rel=0.15)
+    # metrics from the points: the house is a flat 4 m roof; the tree's highest point is 12 m minus
+    # its distance to the middle (0.18 m on the 0.25 m lattice) x 2.5, and its first returns have intensity 300
+    assert fp["top"][house] == 4 and fp["h_std"][house] == 0 and fp["cover"][house] == 1 and fp["i_mean"][house] == 200
+    assert cr["top"][tree] == pytest.approx(12 - 2.5 * np.hypot(0.125, 0.125)) and cr["i_mean"][tree] == 300
+    assert cr["cover"][tree] > 0.9  # a few edge pixels also hold ground hits
 
 
 def test_run_resumes_and_limits(tmp_path, fake_ept):
