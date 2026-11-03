@@ -24,7 +24,7 @@ own packages, and `import pdal` fails (see HANDOFF.md).
 
 `pyproject.toml` puts `src/` on the import path (`pythonpath = ["src"]`), so the tests
 import `tilestream`, `buildings` and `example_peaks` directly. This setting comes before
-`PYTHONPATH`, so you can't point pytest at another copy of a module that way.
+`PYTHONPATH`; to test another copy of a module, see "Adding a test".
 
 ## The main idea: seam tests
 
@@ -112,6 +112,13 @@ Two helpers make the fake lidar:
   done with 0 points, so a resume doesn't fetch it again.
 - `test_run_bbox_sites`: named sites of odd sizes give one file per site, with the right
   size and corner. Each site's peaks lie inside its own site.
+- `test_run_merge_features`: a table with a `geometry` column (WKT) becomes a GeoPackage
+  per window, and `merge` joins them into one. The toy analysis `squares` returns 20 m
+  squares, some of them across a core edge. Each square must be written once and whole, by
+  the window that owns its `x, y`, so a grid gives the same features as one big window.
+  Integer, float and text columns survive, and NaN becomes an empty (NULL) field. A coded
+  column (`codes=`) gets its labels stored in the file as a field domain, and the merged
+  file still has them.
 
 **buildings.py**
 - `test_rectangularity`: a rectangle scores 1, a 45-degree rotated rectangle more than
@@ -119,6 +126,31 @@ Two helpers make the fake lidar:
 - `test_segment_keeps_small_patch_next_to_tree`: a 2 x 2 m patch half a metre from a
   taller tree has no tree top of its own (the tree is higher within `TREE_TOP_RADIUS`),
   but must still become its own object. Before the fix, such patches (sheds!) vanished.
+- `test_segment_separates_tree_over_roof`: a tree hangs over a roof edge. Its crown also
+  hides the ground, so the roof's covered hole runs on under it. The crown must still
+  become a tree of its own: the roof seed is only the roof-like part of the hole. (A pixel
+  or two at the crown's pointed edge may go to the roof; see `test_reclaim_roof`.)
+- `test_segment_seeds_small_shed`: on a 2 x 3 m shed every pixel is near the edge, so no
+  pixel looks like roof by itself (high 3 x 3 `multi_return`). The whole hole is then the
+  seed, and the shed is still a roof.
+- `test_is_building`: the rule, on real objects from Nine Mile Falls and Chewelah: the house
+  and the shed are buildings; a crown with a roof seed (split pulses, rough) and the rock
+  (rough inside) are not. A 16 m² bush (0.36 inside) fails, because small objects must be
+  smoother than `BUILDING_ROUGH_SMALL`, while a 180 m² house just as rough (0.40) passes.
+  A tree-seeded object, one under `BUILDING_AREA`, and one without pulses (NaN) all fail.
+  It works on a whole table and on one row. `building_code` turns this into the `building`
+  column: the shed (under `SMALL_STRUCTURE`) gets 2, the houses 1, the rest 0.
+- `test_describe_roughness_inside`: on a 3 x 4 m flat shed half the pixels are edge pixels,
+  so its median `roughness` is high (> 1), but `roughness_inside` is 0. A dome-shaped rock
+  stays rough inside (a paraboloid: Laplacian 0.625 everywhere).
+- `test_reclaim_roof`: tree pixels that are really roof go to the roof: a 1 m strip along
+  the roof edge (an eave; the opening removes it) and a 3 x 3 m patch with roof all around
+  it (a rooftop unit). A crown hanging over the roof edge stays a tree (but for a few pixels
+  at its pointed edge), and so does a thin hedge that doesn't touch the roof.
+- `test_outlines`: a 2 x 3 m shed's outline is exactly its 4 pixel-edge corners, in map
+  coordinates. A 54 m² rectangle turned 45 degrees loses its pixel staircase, with about the
+  same area. A 15 m² one (under `SIMPLIFY_MIN_AREA`) keeps its exact staircase: simplified,
+  it grew 15%, because simplifying keeps the outer corners of a staircase.
 
 **--exec analyses** (a shell command per window instead of a Python function)
 - `test_exec_contract`: what the command gets. The arguments are its own, then the LAZ
@@ -157,8 +189,9 @@ Two helpers make the fake lidar:
 
 ## Not covered yet
 
-- A seam test for `buildings.py` (all its rasters and the objects table). It was checked
-  by hand on Chewelah: identical. The synthetic points have no buildings or trees, so this
+- A seam test for `buildings.py` (all its rasters, the objects table and the footprints). It
+  was checked by hand on Chewelah and Nine Mile Falls: identical (this found float noise in
+  `rectangularity`, now fixed). The synthetic points have no buildings or trees, so this
   needs real data (a network test).
 - The roof seeds in `segment()` (covered holes, few split pulses, smooth).
 
@@ -167,8 +200,9 @@ Two helpers make the fake lidar:
 - Offline if possible: use `synthetic_points`, or build small arrays by hand like
   `test_segment_keeps_small_patch_next_to_tree`.
 - A test for a bug should fail without the fix. To check, put a copy of the module
-  without the fix in another folder and call the test function directly (pytest itself
-  always uses `src/`):
+  without the fix (or with the code you want the test to catch broken) in another folder.
+  Then run pytest with `-c /dev/null`, which ignores `pyproject.toml`, so `PYTHONPATH`
+  decides which copy is imported:
 
-      PYTHONNOUSERSITE=1 PYTHONPATH=/path/to/copy:src:test ~/miniforge3/envs/tilestream/bin/python \
-          -c "import test_tilestream as t; t.test_segment_keeps_small_patch_next_to_tree()"
+      PYTHONNOUSERSITE=1 PYTHONPATH=/path/to/copy:src ~/miniforge3/envs/tilestream/bin/python \
+          -m pytest -c /dev/null --rootdir=. -p no:cacheprovider test/test_tilestream.py -k NAME

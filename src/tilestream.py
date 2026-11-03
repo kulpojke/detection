@@ -455,6 +455,48 @@ def save_table(path: Path, table: dict[str, np.ndarray], window: Window):
     os.replace(tmp, path)
 
 
+def save_features(path: Path, table: dict[str, np.ndarray], window: Window, srs: str,
+                  codes: dict[str, dict[int, str]] | None = None):
+    """A table with a "geometry" column (WKT, in ``srs``) as a GeoPackage layer, the other
+    columns as attributes. As in save_table, a row is kept if its x, y lies in the core, so a
+    polygon that reaches into a neighbouring window is written whole, by one window only.
+    ``codes`` ({column: {code: label}}) is stored as a coded field domain, so the file itself
+    says what each code means (QGIS shows the labels)."""
+    from osgeo import ogr, osr
+    ogr.UseExceptions()
+    keep = window.in_core(np.asarray(table["x"]), np.asarray(table["y"]))
+    cols = {k: np.asarray(v)[keep] for k, v in table.items()}
+    geoms = cols.pop("geometry")
+    kinds = {"f": ogr.OFTReal, "i": ogr.OFTInteger64, "u": ogr.OFTInteger64, "b": ogr.OFTInteger}  # else text
+    sr = osr.SpatialReference()
+    sr.SetFromUserInput(srs)
+    tmp = path.with_suffix(".tmp.gpkg")  # the driver wants a .gpkg name; merge skips .tmp.gpkg
+    tmp.unlink(missing_ok=True)  # left by a crash: the driver won't overwrite it
+    ds = ogr.GetDriverByName("GPKG").CreateDataSource(str(tmp))
+    layer = ds.CreateLayer(path.parent.name, sr, ogr.wkbUnknown)  # any geometry type
+    for k, v in cols.items():
+        field = ogr.FieldDefn(k, kinds.get(v.dtype.kind, ogr.OFTString))
+        if k in (codes or {}):
+            ds.AddFieldDomain(ogr.CreateCodedFieldDomain(k, "", field.GetType(), ogr.OFSTNone,
+                                                         {str(c): label for c, label in codes[k].items()}))
+            field.SetDomainName(k)
+        layer.CreateField(field)
+    layer.StartTransaction()  # one commit for all features, much faster than one each
+    for i, wkt in enumerate(geoms):
+        f = ogr.Feature(layer.GetLayerDefn())
+        f.SetGeometry(ogr.CreateGeometryFromWkt(str(wkt)))
+        for k, v in cols.items():
+            value = v[i].item()  # numpy -> plain Python value
+            if value != value:  # NaN: SQLite has none, so leave the field empty (NULL)
+                f.SetFieldNull(k)
+            else:
+                f.SetField(k, value)
+        layer.CreateFeature(f)
+    layer.CommitTransaction()
+    ds = None  # closes the file
+    os.replace(tmp, path)
+
+
 # --------------------------------------------------------------------------- analyses
 
 Analysis = Callable[[np.ndarray, Window], dict[str, "Raster | dict"]]
@@ -466,7 +508,7 @@ def _is_summary(r) -> bool:
 
 def load_analysis(path: str | Path):
     """Import a Python analysis file: it must define ``analyze(points, window)`` and may
-    define ``HALO`` (metres)."""
+    define ``HALO`` (metres) and ``CODES`` (what coded columns mean; see run)."""
     spec = importlib.util.spec_from_file_location(Path(path).stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -487,7 +529,9 @@ def exec_analysis(cmd: str | list[str], out_dir: str | Path, srs: str) -> Analys
     GeoTIFFs are cropped to the core (put them on a grid aligned to multiples of the
     resolution so the crop is exact), CSVs with x and y columns lose rows outside the
     core, a <name>.json of scalars becomes a summary row in OUT/<name>.csv after merge,
-    anything else is kept as is. A non-zero exit stops the run with that window not done.
+    anything else is kept as is. That includes a GeoPackage: it isn't cropped, but merge
+    still joins them, so write only the features you own (e.g. whose point is in TS_CORE).
+    A non-zero exit stops the run with that window not done.
     """
     argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
     out_dir = Path(out_dir)
@@ -534,7 +578,8 @@ def exec_analysis(cmd: str | list[str], out_dir: str | Path, srs: str) -> Analys
 
 def run(windows: list[Window], analyze: Analysis, out_dir: str | Path, *, ept: str, srs: str,
         dims: tuple[str, ...] | None = None, resolution: float | None = None,
-        prefetch: int = 1, threads: int = 8, limit: int | None = None):
+        prefetch: int = 1, threads: int = 8, limit: int | None = None,
+        codes: dict[str, dict[str, dict[int, str]]] | None = None):
     """Process windows (from plan, grid_windows or bbox_windows): fetch core+halo points,
     analyze, crop to core, save. Windows with no points are recorded as done without
     calling ``analyze``.
@@ -545,8 +590,13 @@ def run(windows: list[Window], analyze: Analysis, out_dir: str | Path, *, ept: s
       * Raster  -> cropped to the core, out_dir/<name>/<window>.tif
       * table   -> dict of equal-length arrays with "x" and "y"; rows outside the
                    core dropped, out_dir/<name>/<window>.npz
+      * features-> a table that also has "geometry" (WKT polygons, lines or points, in
+                   srs); rows whose x, y is outside the core dropped, the rest kept
+                   whole, out_dir/<name>/<window>.gpkg
       * summary -> dict of scalars (e.g. {"building": True}); one row per window
                    in out_dir/<name>.csv after ``merge``
+    ``codes`` ({output_name: {column: {code: label}}}) says what the codes in a features
+    column mean; it is stored in the GeoPackage (see save_features).
     """
     out_dir = Path(out_dir)
     done_dir = out_dir / "_done"
@@ -583,6 +633,8 @@ def run(windows: list[Window], analyze: Analysis, out_dir: str | Path, *, ept: s
                 d.mkdir(exist_ok=True)
                 if isinstance(r, Raster):
                     write_geotiff(d / f"{w.name}.tif", crop_raster(r, w.core), srs)
+                elif "geometry" in r:
+                    save_features(d / f"{w.name}.gpkg", r, w, srs, (codes or {}).get(out_name))
                 else:
                     save_table(d / f"{w.name}.npz", r, w)
             n = len(pts)
@@ -598,11 +650,13 @@ def run(windows: list[Window], analyze: Analysis, out_dir: str | Path, *, ept: s
 
 
 def merge(out_dir: str | Path):
-    """Mosaic raster outputs as VRTs, concatenate tables into one .npz each and CSVs into
-    one .csv each (with a window column), and collect summaries into one .csv each."""
+    """Mosaic raster outputs as VRTs, concatenate tables into one .npz each, GeoPackages into
+    one .gpkg each and CSVs into one .csv each (with a window column), and collect summaries
+    into one .csv each."""
     out_dir = Path(out_dir)
     for d in sorted(p for p in out_dir.iterdir() if p.is_dir() and not p.name.startswith("_")):
         tifs, npzs, csvs = sorted(d.glob("*.tif")), sorted(d.glob("*.npz")), sorted(d.glob("*.csv"))
+        gpkgs = sorted(p for p in d.glob("*.gpkg") if not p.name.endswith(".tmp.gpkg"))
         if tifs:
             from osgeo import gdal
             gdal.UseExceptions()
@@ -616,6 +670,15 @@ def merge(out_dir: str | Path):
                         cols[k].append(z[k])
             np.savez_compressed(out_dir / f"{d.name}.npz", **{k: np.concatenate(v) for k, v in cols.items()})
             print(f"{d.name}.npz  <- {len(npzs)} windows, {sum(map(len, cols['x'])):,} rows")
+        if gpkgs:
+            from osgeo import gdal
+            gdal.UseExceptions()
+            target = out_dir / f"{d.name}.gpkg"
+            target.unlink(missing_ok=True)
+            for p in gpkgs:  # the first creates the file, the others add to it
+                gdal.VectorTranslate(str(target), str(p), accessMode="append", layerName=d.name)
+            ds = gdal.OpenEx(str(target))  # keep ds: a layer is gone once its dataset is
+            print(f"{d.name}.gpkg  <- {len(gpkgs)} windows, {ds.GetLayer(0).GetFeatureCount():,} features")
         if csvs:
             rows = []
             for p in csvs:
@@ -712,14 +775,14 @@ def main():
             if halo is None:
                 ap.error(f"--halo is required: {a.analysis} has no HALO")
             windows, srs = _plan_from_args(a, halo)
-            analyze = module.analyze
+            analyze, codes = module.analyze, getattr(module, "CODES", None)
         else:
             if a.halo is None:
                 ap.error("--halo is required with --exec")
             windows, srs = _plan_from_args(a, a.halo)
-            analyze = exec_analysis(a.exec, a.out_dir, srs)
+            analyze, codes = exec_analysis(a.exec, a.out_dir, srs), None
         run(windows, analyze, a.out_dir, ept=a.ept, srs=srs, dims=tuple(a.dims.split(",")) if a.dims else None,
-            resolution=a.resolution, prefetch=a.prefetch, threads=a.threads, limit=a.limit)
+            resolution=a.resolution, prefetch=a.prefetch, threads=a.threads, limit=a.limit, codes=codes)
     except (ValueError, RuntimeError) as e:
         sys.exit(f"error: {e}")
 

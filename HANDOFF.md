@@ -1,6 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-10-30, evening (Claude, after the test fixes and a full test run)._
+_Last updated 2026-11-03 (Claude, after step 4 of building detection: footprints, the
+building rule and its codes)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -8,25 +9,26 @@ usgs-lidar-public, or any ept.json URL) and an area. It streams windows of point
 each with a halo, to any analysis as they arrive, with no edge effects and nothing big
 on disk. Analyses plug in as Python (`--analysis file.py`) or as any command or shell
 script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2_B22**
-(only classes 1, 2, 7, 18), so we will have to detect them ourselves. That detection
-will be a separate analysis script, not part of tilestream, and it is not the current
-task: the focus is on making the tile reading work properly.
+(only classes 1, 2, 7, 18), so we detect them ourselves, in a separate analysis:
+`src/buildings.py` (see "Building detection"). tilestream stays the reading layer; no
+building logic goes into it.
 
-## Status (2026-10-30, evening)
-**The full suite passes: 49 of 49** (40 offline, 9 network), in about 2 minutes.
-- Test fixes from the morning, all done:
-  - The test-site finder (`test/conftest.py`) compares each quarter with the
-    well-filled quarters (`0.6 * percentile(count[count > 0], 75)`). It used to pick a
-    site at the edge of the data.
-  - `test_fetch_small_bbox` no longer asserts that the points fill the box.
-  - Both real-data seam tests (`test_seam_python_analysis`, `test_cli_exec_seam`) now
-    require DSM coverage > 0.9.
-- The finder now picks the 500 m square at (445000, 5300000) in EPSG:6340 (relief score
-  453 m). There, full density is 28.3 pts/m², 3.9 at `resolution=2` and 0.19 at `resolution=8`.
-- `info` and `plan` from "How to use it" work. The 3 km window at `resolution=8` read
-  0.65 M points in 2.3 s.
-- This is a new machine. The env is now `~/miniforge3/envs/tilestream` (there is no
-  `~/miniconda3` here), and Python must be run with `PYTHONNOUSERSITE=1`. See Environment.
+## Status (2026-11-03)
+- **Offline suite: 51 passed** (10 network tests skipped), in about 11 s.
+- **The network suite was last run on 2026-10-30** (49 of 49). Since then `fetch_points`
+  got the empty-area fix (`test_fetch_empty_area_keeps_fields`), and tilestream got the
+  GeoPackage output. Run the full suite once (see Tests).
+- **tilestream, new since then:**
+  - an analysis can return polygons (features), which become GeoPackages;
+  - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
+- **buildings.py:** steps 1–4c are done. It writes footprint polygons with a `building`
+  code. See "Building detection".
+- Last commit before this work: 26abb17, pushed to https://github.com/kulpojke/detection.
+- Earlier (2026-10-30), for reference:
+  - The network test-site finder (`test/conftest.py`) picks the 500 m square at
+    (445000, 5300000) in EPSG:6340. There, full density is 28.3 pts/m², 3.9 at
+    `resolution=2` and 0.19 at `resolution=8`.
+  - A 3 km window at `resolution=8` read 0.65 M points in 2.3 s.
 
 ## Decision: read from the public EPT with PDAL, not rockyweb LAZ
 - rockyweb is slow and unreliable (HTTP 429s; one 59 MB tile took 489 s).
@@ -61,8 +63,19 @@ so a forgotten `--bbox` can't start a run over all 167 billion points.
 - **Other options:** `--core` (window size, m), `--halo`, `--dims X,Y,Z,...` (fetch only
   some fields), `--resolution` (thinning), `--limit`, `--prefetch`.
 - **`--analysis file.py`:** the file defines `analyze(points, window)` and optionally
-  `HALO`. It returns `{name: Raster | table with x/y | summary dict of scalars}`. Build
-  rasters on `window.grid(res)`.
+  `HALO` and `CODES`. It returns `{name: result}`. Build rasters on `window.grid(res)`.
+  A result is one of:
+  - **a Raster:** cropped to the core;
+  - **a table** (a dict of arrays) with `x`, `y`: rows outside the core are dropped,
+    and merge joins the windows into `out/<name>.npz`;
+  - **features:** a table that also has a `geometry` column (WKT, in the output CRS).
+    It is saved as a GeoPackage per window. A row is kept by the window whose core holds
+    its `x, y`, and its polygon is written whole, never cut at a window edge. `merge`
+    joins the windows into `out/<name>.gpkg`;
+  - **a summary:** a dict of scalars.
+- **`CODES`** (or `run(..., codes=...)`): `{output: {column: {code: label}}}`. The labels
+  are stored in the GeoPackage as a coded field domain, so the file says what each code
+  means, and QGIS shows the labels. `merge` keeps them.
 - **`--exec "CMD args"`:** runs once per window as `CMD args WINDOW.laz WORK_DIR`.
   - The conda env's `bin/` is first on PATH, so `pdal` and `gdal_*` match the env.
   - Environment variables: `TS_NAME`, `TS_SRS`, `TS_CORE`, `TS_HALO` ("xmin ymin xmax ymax").
@@ -95,6 +108,71 @@ so a forgotten `--bbox` can't start a run over all 167 billion points.
 - **`--all` on WA_NorthEast_2_B22** gives 8,837 windows of 1 km. That's about 10% more
   than the 8,068 tiles, because the 2 km cells overshoot the data edge.
 
+## Building detection (`src/buildings.py`)
+A `--analysis` file for tilestream, with `HALO = 50` m: an object must be seen whole, and
+under a building the ground is filled in from around it.
+
+    $P src/tilestream.py run out/ --ept WA_NorthEast_2_B22 --analysis src/buildings.py \
+        --bbox 446750 5347000 447250 5347500 --bbox-crs EPSG:6340 --core 250
+    $P src/tilestream.py merge out/
+
+- **Rasters** (0.5 m):
+  - `dtm`, `dsm` and `ndsm`;
+  - `ground_gap`: the distance to the nearest ground point; roofs leave holes with
+    straight edges;
+  - `multi_return`: the share of split pulses;
+  - `roughness`: |Laplacian| of the dsm;
+  - `segments`: 1 roof, 2 tree.
+- **`segment()`:** a watershed on the ndsm, from two kinds of seeds:
+  - **roof seeds:** the roof-like pieces of covered holes. A shed without such a piece
+    is seeded with its whole hole.
+  - **tree tops:** local maxima within 2.5 m.
+
+  Patches without a seed get one at their highest pixel. Afterwards `reclaim_roof()`
+  gives "tree" pixels that are really roof to the nearest roof:
+  - thin pieces touching a roof (eaves, ridges), found with an opening using a 1 m disk;
+  - tree patches with roof all around (rooftop units).
+- **`objects`** (table): one row per object, with these features:
+  - `area`, `height`, `hole_depth`, `hole_share`, `rectangularity`, `multi_return`;
+  - `roughness`, and `roughness_inside` (the same without the edge pixels: on a small
+    object, half the pixels are edge, where the Laplacian sees the drop to the ground);
+  - `building` (see below).
+- **`footprints`** (GeoPackage): every roof-seeded object as a polygon, with the same
+  columns. Rejects stay in the layer, so you can see them in QGIS. Outlines come from
+  `gdal.Polygonize` and are simplified (0.5 m) only for objects of at least 25 m².
+- **The rule, `is_building()`:** over the whole object, it needs all of:
+  - split pulses < 0.35;
+  - `roughness_inside` < 0.5 (< 0.3 for objects under 25 m²: sheds have simple roofs,
+    bushes don't);
+  - area ≥ 4 m².
+- **`building` codes:** 0 = not a building, 1 = building, 2 = shed, container or RV (a
+  building under 40 m²).
+- **Test sites** (EPSG:6340, 500 m):
+  - Chewelah, `446750 5347000 447250 5347500`: a town;
+  - Nine Mile Falls, `457000 5291750 457500 5292250`: forest with houses.
+
+  Checked by Michael in QGIS:
+  - a rock at (457380, 5292240), which the rule rejects (rough inside);
+  - a 7.5 m² shed at (457368, 5292215);
+  - a tree crown that got a roof seed at (457059, 5291980), which the rule rejects.
+- **Last results** (2026-11-03):
+  - Chewelah: 181 footprints (114 buildings, 45 small structures, 22 not).
+  - Nine Mile: 6 footprints (3, 1, 2).
+  - Four 250 m windows give exactly the same rasters, objects and footprints as one
+    500 m window. This was checked by hand; there is no automatic real-data seam test
+    for buildings.py yet.
+- **Known limits:**
+  - Vehicles, containers and dumpsters look like sheds from above (code 2).
+  - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
+    thinner than ~2.5 m. Example: the house at (446776, 5347492).
+  - Thin things sticking out of a wall can become little roof spikes.
+  - Big diagonal outlines grow ~8%, because simplifying keeps the outer staircase corners.
+  - Big tree crowns are split into several pieces.
+  - A building without a roof seed is missed (`missed_building`).
+- **Decisions:**
+  - The minimum building area stays 4 m². 8 m² was considered, to drop vehicles and
+    dumpsters, but the checked shed is 7.5 m².
+
 ## Tests
 Run from the project root, inside a memory cap:
 
@@ -102,13 +180,19 @@ Run from the project root, inside a memory cap:
         ~/miniforge3/envs/tilestream/bin/python -m pytest --ept WA_NorthEast_2_B22   # all, ~2 min
     ... -m pytest                                                                     # offline only, ~10 s
 
-- **`test/test_tilestream.py`** (offline, 40 tests): synthetic points stand in for the
+`test/README.md` explains every test, and how to check that a new test fails without its fix.
+
+- **`test/test_tilestream.py`** (offline, 51 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
+  The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
   - UTM zone choice
   - `plan()` for each kind of area
   - cropping rasters, GeoTIFFs and CSVs
   - run, merge, resume, settings guard, empty-window skipping
+  - GeoPackage output and codes, through merge
+  - buildings.py: segmentation, `reclaim_roof`, outlines, `roughness_inside`, the rule
+    and the codes
   - the `--exec` contract (arguments, environment variables, PATH, output handling, failure)
   - seam tests for both the Python analysis and `example_dsm.sh`
 - **`test/test_ept.py`** (marked `network`, skipped without `--ept`): no hardcoded
@@ -152,16 +236,29 @@ Run from the project root, inside a memory cap:
 - `src/tilestream.py`: the framework and CLI (info, plan, run, merge).
 - `src/example_peaks.py`: example Python analysis (1 m DSM plus local maxima).
 - `src/example_dsm.sh`: example `--exec` analysis (1 m DSM with the `pdal` command-line tool).
+- `src/buildings.py`: building detection (an `--analysis` file; see "Building detection").
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
 - `test/test_tilestream.py`, `test/test_ept.py`: the tests.
+- `test/README.md`: what each test checks.
 - `pyproject.toml`: pytest config (pythonpath `src`, `network` marker).
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 
 ## Next steps
-1. Decide the permanent fix for the `~/.local` packages (see Environment).
-2. Keep the focus on the reading layer. Try a modest real `--bbox` run with an example
-   analysis, check the merged outputs for seams, then scale up (`--list` or `--all`, in
-   chunks or overnight). Larger windows (2 km) might fetch faster per km², but measure
-   memory first.
-3. Later, as a separate analysis script: building detection. Decide Python or `--exec`,
-   and its spatial reach, which sets `--halo`.
+1. **Tree crowns.** Michael wants crown polygons too, but first fewer artificially split
+   crowns. His idea:
+   - take the crown pixels of the dsm;
+   - apply a mean filter over crown pixels only;
+   - find the tops and run the watershed again, inside the crowns.
+
+   Plan: first measure the splitting in Nine Mile, then try 2–3 filter sizes side by
+   side, then build it into `segment()`. The crowns then get a code or a layer of their own.
+2. Run the full network suite once (not run since 2026-10-30).
+3. Later for buildings:
+   - straighten outlines (4d);
+   - a real-data seam test for buildings.py (a network test);
+   - a clue for vehicles and containers (context, or a second scan);
+   - the `reclaim_roof` thin-neck case.
+4. Decide the permanent fix for the `~/.local` packages (see Environment).
+5. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
+   then go larger (`--list` or `--all`, in chunks or overnight). Measure memory first for
+   larger windows.

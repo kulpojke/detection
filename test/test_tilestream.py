@@ -293,11 +293,115 @@ def test_segment_keeps_small_patch_next_to_tree():
     ndsm = 15 - 2 * np.hypot(x - 12, y - 15)  # a cone-shaped tree, 3 m high at its edge, 6 pixels out
     ndsm[ndsm < 3] = 0
     ndsm[14:18, 20:24] = 2.5  # the patch, one empty pixel right of the tree
-    g = {"ndsm": ndsm.astype(np.float32), "ground_gap": np.zeros((30, 30), np.float32)}  # no holes: no roof seeds
+    zeros = np.zeros((30, 30), np.float32)
+    g = {"ndsm": ndsm.astype(np.float32), "ground_gap": zeros,  # no holes: no roof seeds
+         "multi_return": zeros, "roughness": zeros}
     segments, n_roofs = buildings.segment(g)
     tree, patch = segments[15, 12], segments[15, 21]
     assert n_roofs == 0 and tree > 0 and patch > 0 and tree != patch
     assert set(np.unique(segments)) == {0, tree, patch}  # just these two objects
+
+
+def test_segment_separates_tree_over_roof():
+    """A tree hanging over a roof edge also hides the ground, so the roof's covered hole runs
+    on under its crown. The crown still becomes a tree of its own, not part of the roof."""
+    y, x = np.mgrid[0:50, 0:50]
+    roof = (y >= 5) & (y < 35) & (x >= 5) & (x < 35)  # a flat 15 x 15 m roof, 4 m high
+    cone = 8 - 1.2 * np.hypot(x - 36, y - 20)  # a tree on the roof's right edge, 8 m at the top
+    crown = cone > np.where(roof, 4, 2.5)  # where the crown is seen from above
+    ndsm = np.where(crown, cone, np.where(roof, 4, 0)).astype(np.float32)
+    split = crown.astype(np.float32)  # pulses split in the crown, not on the roof
+    g = {"ndsm": ndsm, "ground_gap": np.where(ndsm > 2, 2, 0).astype(np.float32),  # no ground under either
+         "multi_return": split, "roughness": split, "pulses": np.ones((50, 50)), "split": split}
+    segments, n_roofs = buildings.segment(g)
+    assert n_roofs == 1 and segments[20, 36] > 1  # the tree top is not in the roof
+    assert (segments[roof & ~crown] == 1).all()  # the roof keeps all of its own pixels
+    # the crown is the tree, but for a pixel or two at its pointed edge: there it is thinner than
+    # the disk of reclaim_roof's opening, so they go to the roof
+    assert np.sum(segments[crown] != segments[20, 36]) <= 2
+
+
+def test_segment_seeds_small_shed():
+    """On a 2 x 3 m shed every pixel is near the edge, so the 3 x 3 multi_return of each pixel
+    is high, though the shed as a whole has no split pulses. It is still a roof."""
+    shed = np.zeros((20, 20), bool)
+    shed[8:12, 7:13] = True
+    ones = np.ones((20, 20))
+    g = {"ndsm": np.where(shed, 2.5, 0).astype(np.float32), "ground_gap": np.where(shed, 1, 0).astype(np.float32),
+         "multi_return": np.full((20, 20), 0.2, np.float32),  # edge splits seen from each 3 x 3 neighbourhood
+         "roughness": np.zeros((20, 20), np.float32), "pulses": ones, "split": 0 * ones}
+    segments, n_roofs = buildings.segment(g)
+    assert n_roofs == 1 and (segments[shed] == 1).all()
+
+
+def test_is_building():
+    """The rule on real objects from Nine Mile Falls and Chewelah (bush, big house), and edge cases."""
+    t = {k: np.array(v, dtype=float) for k, v in {
+        #                  house  shed  crown  rock  bush  big house  tree-seeded  3.5 m^2  no pulses
+        "roof_seed":        [1,    1,    1,     1,    1,    1,         0,           1,       1],
+        "area":             [183,  7.5,  12.8,  8.8,  16,   180,       50,          3.5,     10],
+        "multi_return":     [0.08, 0.18, 0.55,  0.27, 0.23, 0.18,      0.1,         0.08,    np.nan],
+        "roughness_inside": [0.12, 0.05, 2.43,  0.61, 0.36, 0.40,      0.1,         0.05,    0.1]}.items()}
+    # the bush is too rough inside for a small object; the big house, as rough, has a complex roof
+    assert buildings.is_building(t).tolist() == [True, True, False, False, False, True, False, False, False]
+    assert buildings.is_building({k: v[1] for k, v in t.items()})  # one row works too
+    # the building column: the shed is a small structure, the houses are buildings
+    assert buildings.building_code(t).tolist() == [1, 2, 0, 0, 0, 1, 0, 0, 0]
+
+
+def test_describe_roughness_inside():
+    """On a small object half the pixels are edge pixels, where the Laplacian sees the drop to the
+    ground. Inside, a shed's flat roof is smooth, but a rock (a dome) is not."""
+    from scipy import ndimage
+    y, x = np.mgrid[0:20, 0:30]
+    shed = (y >= 6) & (y < 12) & (x >= 4) & (x < 12)  # 3 x 4 m, flat, 2.5 m high
+    dome = 2.5 * (1 - np.hypot(x - 21, y - 9) ** 2 / 16)  # a rock 4 m across, 2.5 m high
+    rock = dome > 0
+    dsm = np.where(shed, 2.5, 0) + np.where(rock, dome, 0)
+    zeros = np.zeros(dsm.shape)
+    g = {"ndsm": dsm, "roughness": np.abs(ndimage.laplace(dsm)), "ground_gap": zeros,
+         "pulses": zeros + 1, "split": zeros}
+    f = buildings.describe(*np.nonzero(shed), g)
+    assert f["roughness"] > 1 and f["roughness_inside"] == 0  # all pixels: half of them are edge
+    # a paraboloid bends the same everywhere: Laplacian 4 x 2.5 m / 4^2 pixels
+    assert buildings.describe(*np.nonzero(rock), g)["roughness_inside"] == pytest.approx(0.625)
+
+
+def test_reclaim_roof():
+    """Tree pixels that are really roof go to the roof: a thin strip along its edge (an eave) and
+    a patch with roof all around it (a rooftop unit). A crown over the roof's edge stays a tree,
+    and so does a thin hedge that doesn't touch the roof."""
+    seg = np.zeros((40, 40), np.int32)
+    y, x = np.mgrid[0:40, 0:40]
+    seg[5:30, 5:25] = 1  # the roof (n_roofs = 1)
+    seg[5:30, 3:5] = 2  # a 1 m strip along its left edge
+    seg[14:20, 12:18] = 3  # a 3 x 3 m unit on it
+    crown = np.hypot(x - 27, y - 15) <= 5  # a 5 m crown over its right edge
+    seg[crown] = 4
+    seg[34:36, 5:30] = 5  # a 1 m hedge, 2 m from the roof
+    out = buildings.reclaim_roof(seg.copy(), 1)
+    assert (out[5:30, 3:5] == 1).all() and (out[14:20, 12:18] == 1).all()  # strip and unit are roof now
+    assert np.sum(out[crown] != 4) <= 4  # pixels at the crown's pointed edge, next to the roof, may go
+    assert (out[34:36, 5:30] == 5).all()
+
+
+def test_outlines():
+    """Outlines follow the pixel edges in map coordinates. On objects of at least
+    SIMPLIFY_MIN_AREA a pixel staircase becomes a straight edge; smaller ones keep it."""
+    from osgeo import ogr
+    labels = np.zeros((60, 60), np.int32)
+    labels[2:6, 3:9] = 1  # 4 x 6 pixels: a 2 x 3 m shed
+    y, x = np.mgrid[0:60, 0:60]
+    labels[(abs(x + y - 38) <= 8) & (abs(x - y + 2) <= 3)] = 2  # a rectangle turned 45 degrees, 14.75 m^2
+    labels[(abs(x + y - 82) <= 16) & (abs(x - y) <= 6)] = 3  # a bigger one, 53.75 m^2
+    shapes = {i: ogr.CreateGeometryFromWkt(w) for i, w in buildings.outlines(labels, 1000.0, 2000.0).items()}
+    assert shapes[1].GetEnvelope() == (1001.5, 1004.5, 1997.0, 1999.0) and shapes[1].GetArea() == 6
+    assert shapes[1].GetGeometryRef(0).GetPointCount() == 5  # 4 corners, closed
+    # small: the exact staircase (simplified, it grew 15%)
+    assert shapes[2].GetGeometryRef(0).GetPointCount() == 41 and shapes[2].GetArea() == 14.75
+    # big: straight edges, and about the same area
+    assert shapes[3].GetGeometryRef(0).GetPointCount() <= 9
+    assert shapes[3].GetArea() == pytest.approx(np.sum(labels == 3) * 0.25, rel=0.1)
 
 
 def test_run_resumes_and_limits(tmp_path, fake_ept):
@@ -338,6 +442,51 @@ def test_run_bbox_sites(tmp_path, fake_ept):
     with np.load(tmp_path / "peaks.npz") as pk:
         inside = [w.in_core(pk["x"], pk["y"]) for w in windows]
     assert (inside[0] | inside[1]).all()
+
+
+def squares(pts, w):
+    """Toy analysis with a polygon output: a 20 m square around each point of a 40 m lattice
+    over AREA (squares centred near a core edge reach into the next window), with an integer,
+    a float (some NaN), a text and a coded column (see SQUARE_CODES)."""
+    cx, cy = (v.ravel() for v in np.meshgrid(np.arange(500005, 501000, 40.0), np.arange(4000005, 4000500, 40.0)))
+    wkt = [f"POLYGON(({x - 10} {y - 10},{x + 10} {y - 10},{x + 10} {y + 10},{x - 10} {y + 10},{x - 10} {y - 10}))"
+           for x, y in zip(cx, cy)]
+    i = np.arange(len(cx))
+    return {"squares": {"x": cx, "y": cy, "geometry": np.array(wkt), "id": i,
+                        "value": np.where(i % 7 == 0, np.nan, i / 2), "label": np.array([f"sq{k}" for k in i]),
+                        "kind": i % 3}}
+
+
+SQUARE_CODES = {"squares": {"kind": {0: "red", 1: "green", 2: "blue"}}}
+
+
+def read_features(path):
+    from osgeo import ogr
+    ds = ogr.Open(str(path))  # keep ds: a layer is gone once its dataset is
+    return {(f.GetGeometryRef().ExportToWkt(), f["id"], f["value"], f["label"]) for f in ds.GetLayer(0)}
+
+
+def test_run_merge_features(tmp_path, fake_ept):
+    """A table with a geometry column becomes a GeoPackage. Each polygon is kept whole, by the
+    one window that owns its point, so a grid of windows gives the same features as one window.
+    The meaning of coded columns is stored in the file, and survives the merge."""
+    from osgeo import gdal, ogr
+    grid, one = tmp_path / "grid", tmp_path / "one"
+    ts.run(ts.grid_windows([AREA], 250, 0), squares, grid, ept="fake", srs=SRS, codes=SQUARE_CODES)
+    ts.merge(grid)
+    ts.run(ts.bbox_windows([AREA], 0, ["all"]), squares, one, ept="fake", srs=SRS, codes=SQUARE_CODES)
+    features = read_features(grid / "squares.gpkg")
+    assert len(features) == 25 * 13 and features == read_features(one / "squares" / "all.gpkg")
+    ds = ogr.Open(str(grid / "squares.gpkg"))
+    layer = ds.GetLayer(0)
+    assert layer.GetFeatureCount() == 25 * 13  # each square once (the set above would hide doubles)
+    assert layer.GetName() == "squares" and layer.GetSpatialRef().GetAuthorityCode(None) == "6340"
+    assert {f.GetGeometryRef().GetArea() for f in layer} == {400}  # squares on a core edge are whole
+    assert sum(value is None for _, _, value, _ in features) == len(range(0, 25 * 13, 7))  # NaN -> empty
+    ds = gdal.OpenEx(str(grid / "squares.gpkg"))
+    field = ds.GetLayer(0).GetLayerDefn().GetFieldDefn(ds.GetLayer(0).FindFieldIndex("kind", True))
+    assert field.GetDomainName() == "kind"
+    assert ds.GetFieldDomain("kind").GetEnumeration() == {"0": "red", "1": "green", "2": "blue"}
 
 
 # --------------------------------------------------------------------------- --exec analyses
