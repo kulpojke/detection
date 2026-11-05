@@ -1,0 +1,19 @@
+# The conda env for tilestream, buildings.py and the tests. Create it with:
+#     mamba env create -f environment.yml
+# The versions are those of the local env (2026-11-05), so CI tests what runs locally.
+name: tilestream
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pdal=2.10.2
+  - python-pdal=3.5.5
+  - gdal=3.13.3
+  - numpy=2.5.4
+  - scipy=1.18.1
+  - scikit-image=0.26.0
+  - pyproj=3.8.0
+  - laspy=2.7.0
+  - lazrs-python=0.8.2
+  - pytest=9.2.0

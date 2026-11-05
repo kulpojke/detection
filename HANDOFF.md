@@ -17,7 +17,7 @@ building logic goes into it.
 - **Offline suite: 64 passed** (10 network tests skipped), in about 12 s.
 - **The network suite was last run on 2026-10-30** (49 of 49). Since then `fetch_points`
   got the empty-area fix (`test_fetch_empty_area_keeps_fields`), and tilestream got the
-  GeoPackage output. Run the full suite once (see Tests).
+  GeoPackage output. It now runs in CI on every push (see Tests); check the first run.
 - **tilestream, new since then:**
   - an analysis can return polygons (features), which become GeoPackages;
   - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
@@ -285,6 +285,12 @@ Run from the project root, inside a memory cap:
 
 `test/README.md` explains every test, and how to check that a new test fails without its fix.
 
+**CI** (GitHub Actions, `.github/workflows/network-tests.yml`, added 2026-11-05): on every
+push, and by hand from the Actions tab, GitHub builds the env from `environment.yml` (cached
+until that file changes) and runs the network tests only
+(`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
+that is still going. The offline tests don't run in CI yet.
+
 - **`test/test_tilestream.py`** (offline, 64 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
@@ -321,6 +327,9 @@ Run from the project root, inside a memory cap:
   Versions: python 3.12, PDAL 2.10.2, python-pdal 3.5.5, GDAL 3.13.3, numpy 2.5.4,
   scipy 1.18.1, scikit-image 0.26.0 (added 2026-11-02, for the watershed in buildings.py),
   pyproj 3.8.0, laspy 2.7.0 (with lazrs, for validation only), pytest 9.2.
+- **`environment.yml`** pins those same versions (conda-forge only), for CI and for a new
+  machine: `mamba env create -f environment.yml`. When you change the local env, change
+  this file too, so CI keeps testing what runs locally.
 - **`PYTHONNOUSERSITE=1` is needed.** `~/.local/lib/python3.12/site-packages` holds old
   `pip install --user` packages (pandas 2.3.3, scipy 1.16.2, geopandas, shapely, sklearn
   and more, from 2025-10-02). Every Python 3.12 searches that folder before its own
@@ -347,10 +356,14 @@ Run from the project root, inside a memory cap:
 - `test/test_tilestream.py`, `test/test_ept.py`: the tests.
 - `test/README.md`: what each test checks.
 - `pyproject.toml`: pytest config (pythonpath `src`, `network` marker).
+- `environment.yml`: the conda env, with pinned versions.
+- `.github/workflows/network-tests.yml`: CI, the network tests on every push.
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 
 ## Next steps
-1. Run the full network suite once (not run since 2026-10-30).
+1. Check the first CI run of the network suite (GitHub Actions; not run since 2026-10-30).
+   If it fails, find out whether it is the code or a difference between CI and the local
+   machine.
 2. Buildings without a roof seed. Two ways to tackle it:
    - find out why they get no seed;
    - or use a much stricter rule for seedless objects only, e.g. split pulses < 0.15. The

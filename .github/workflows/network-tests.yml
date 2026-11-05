@@ -1,0 +1,30 @@
+# The network tests (test/test_ept.py, marked network): they read real lidar from the public
+# USGS EPT on S3. Runs on every push, and by hand from the Actions tab ("Run workflow").
+name: network tests
+
+on:
+  push:
+  workflow_dispatch:
+
+# a new push to the same branch cancels the run that is still going
+concurrency:
+  group: network-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -el {0}  # a login shell, so the conda env is active
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: environment.yml
+          cache-environment: true  # the env is built once, then reused until environment.yml changes
+      - name: network tests
+        env:
+          PYTHONNOUSERSITE: 1  # as locally: no packages from ~/.local
+        run: python -m pytest -m network --ept WA_NorthEast_2_B22 -v
