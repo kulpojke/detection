@@ -156,18 +156,35 @@ Two helpers make the fake lidar:
   only touches the strip (now roof) becomes an object of its own. Every object ends up in one
   piece. Before the fix, such objects became multipolygons in `crowns.gpkg` (fid 364 in
   Chewelah: three parts of a roof's edge).
-- `test_outlines`: a 2 x 3 m shed's outline is exactly its 4 pixel-edge corners, in map
-  coordinates. A 54 m² rectangle turned 45 degrees loses its pixel staircase, with about the
+- `test_outlines`: `trace` then `simplify`. A 2 x 3 m shed's outline is exactly its 4 pixel-edge
+  corners, in map coordinates. A 54 m² rectangle turned 45 degrees loses its pixel staircase, with about the
   same area. A 15 m² one (under `SIMPLIFY_MIN_AREA`) keeps its exact staircase: simplified,
   it grew 15%, because simplifying keeps the outer corners of a staircase.
+- `test_straighten`: shapes turned 30 degrees, drawn in 0.5 m pixels (a pixel is in if its
+  centre is), come back from `straighten` with their true corners (each within 0.15 m) and
+  area (within 2%): a 12 x 8 m rectangle, an L, a rectangle with a diagonal wall (kept), a
+  6 x 6 m garage, and a rectangle with a 3.2 m cut corner. That cut is shorter than
+  `MIN_DIAGONAL`, so it counts as a ragged bit and the walls meet at the corner, although the
+  corner is further than `MAX_SHIFT` from the middle of the cut (square walls always meet).
+- `test_straighten_keeps_neighbours_apart`: two buildings 1 m apart stay more than 0.75 m
+  apart: a wall moves to the middle of its pixel staircase, not outward.
+- `test_straighten_safety_net`: a 2 x 3 m shed is too small (code 1), and a disc's walls point
+  every way, so they don't agree on a direction (code 2); neither gets a new outline.
+- `test_trace_fills_small_holes`: a one-pixel hole in a roof is filled, a 2 x 2 m light well
+  stays.
+- `test_tree_notch`: a tree over a roof's corner leaves a diagonal wall with tree in front of
+  it, a tree notch of about 5.7 m. The same diagonal with ground in front is a real wall (0),
+  and so is a straight wall with a tree beside it.
 
 - `test_analyze_layers`: the whole `analyze()` on synthetic points (`scene_points`): one
   pulse every 0.25 m over flat ground, with a house (flat roof), a tree (a cone whose pulses
   split and also reach the ground), a smooth dome (a "rock") and a tiny bush. The house is a
   footprint with code 1, the tree a crown. The rock gets a roof seed but the rule rejects it
   (rough inside), so it is in both layers (`building` 0, `roof_seed` 1). The bush is an
-  object but too small for a crown. The tree's polygon lies around its top, with about the
-  cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
+  object but too small for a crown. The house gets straight walls (`outline` 0: 4 corners,
+  10 x 12 m; this caught a bug where a wall that is a single pixel edge had no direction), the
+  rock `outline` 5 (not a building), neither a `review` flag; only footprints have these
+  columns. The tree's polygon lies around its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
   its intensity), and the tree's `top` is its highest point, with its own intensity.
 - `test_point_metrics`: heights, cover and intensity per object from a handful of points,
   including a return under `MIN_HEIGHT` (counts for `cover`, not for heights), a second

@@ -454,7 +454,7 @@ def test_outlines():
     y, x = np.mgrid[0:60, 0:60]
     labels[(abs(x + y - 38) <= 8) & (abs(x - y + 2) <= 3)] = 2  # a rectangle turned 45 degrees, 14.75 m^2
     labels[(abs(x + y - 82) <= 16) & (abs(x - y) <= 6)] = 3  # a bigger one, 53.75 m^2
-    shapes = {i: ogr.CreateGeometryFromWkt(w) for i, w in buildings.outlines(labels, 1000.0, 2000.0).items()}
+    shapes = {i: buildings.simplify(g) for i, g in buildings.trace(labels, 1000.0, 2000.0).items()}
     assert shapes[1].GetEnvelope() == (1001.5, 1004.5, 1997.0, 1999.0) and shapes[1].GetArea() == 6
     assert shapes[1].GetGeometryRef(0).GetPointCount() == 5  # 4 corners, closed
     # small: the exact staircase (simplified, it grew 15%)
@@ -462,6 +462,99 @@ def test_outlines():
     # big: straight edges, and about the same area
     assert shapes[3].GetGeometryRef(0).GetPointCount() <= 9
     assert shapes[3].GetArea() == pytest.approx(np.sum(labels == 3) * 0.25, rel=0.1)
+
+
+def turned(inside, angle=30):
+    """A 40 x 40 m label image (0.5 m pixels, top left corner at (1000, 2040)) of a shape given in
+    its own coordinates (u along it, v across, centre at (1020, 2020)), turned by angle: a pixel is
+    in the shape if its centre is."""
+    y, x = np.mgrid[0:80, 0:80]
+    x, y = (x + 0.5) * 0.5 - 20, 20 - (y + 0.5) * 0.5
+    t = np.radians(angle)
+    return inside(x * np.cos(t) + y * np.sin(t), y * np.cos(t) - x * np.sin(t)).astype(np.int32)
+
+
+def turn(corners, angle=30):
+    """Shape coordinates (as in turned) in map coordinates."""
+    t = np.radians(angle)
+    return np.array([(1020 + u * np.cos(t) - v * np.sin(t), 2020 + u * np.sin(t) + v * np.cos(t)) for u, v in corners])
+
+
+def pixel_outlines(labels):
+    """{label: ogr geometry}: the exact pixel outlines of a label image made by turned."""
+    return buildings.trace(labels, 1000.0, 2040.0)
+
+
+BOX = lambda u, v: (abs(u) < 6) & (abs(v) < 4)  # 12 x 8 m
+STRAIGHT_SHAPES = {  # inside test (shape coordinates) and the true corners
+    "rectangle": (BOX, [(-6, -4), (6, -4), (6, 4), (-6, 4)]),
+    "L": (lambda u, v: BOX(u, v) & ~((u > 1) & (v > 0)), [(-6, -4), (6, -4), (6, 0), (1, 0), (1, 4), (-6, 4)]),
+    "diagonal wall": (lambda u, v: BOX(u, v) & (u + v < 7), [(-6, -4), (6, -4), (6, 1), (3, 4), (-6, 4)]),
+    "6 x 6 m garage": (lambda u, v: (abs(u) < 3) & (abs(v) < 3), [(-3, -3), (3, -3), (3, 3), (-3, 3)]),
+    # a cut under MIN_DIAGONAL (3.2 m; 3.6 m between the corners Douglas-Peucker finds) is a ragged
+    # bit: the walls meet at the corner, though it is further than MAX_SHIFT from the middle of the
+    # cut (square walls always meet)
+    "3.2 m cut corner": (lambda u, v: BOX(u, v) & (u + v < 7.75), [(-6, -4), (6, -4), (6, 4), (-6, 4)]),
+}
+
+
+@pytest.mark.parametrize("shape", STRAIGHT_SHAPES)
+def test_straighten(shape):
+    """A shape turned 30 degrees comes back with its true corners: right angles, the diagonal wall
+    kept, no corner cut off by the pixels, and about the true area (not the 8% more of simplifying)."""
+    inside, true = STRAIGHT_SHAPES[shape]
+    out, agree, code = buildings.straighten(pixel_outlines(turned(inside))[1])
+    assert code == 0
+    corners, true = np.array(out.GetGeometryRef(0).GetPoints())[:-1, :2], turn(true)
+    assert len(corners) == len(true)
+    assert max(np.hypot(*(corners - c).T).min() for c in true) < 0.15  # m, each true corner
+    assert out.GetArea() == pytest.approx(buildings.ring_area(np.vstack([true, true[:1]])), rel=0.02)
+
+
+def test_straighten_keeps_neighbours_apart():
+    """Two 8 x 5 m buildings 1 m apart stay apart: a wall moves to the middle of its pixel staircase,
+    never a whole pixel outward."""
+    labels = turned(lambda u, v: (abs(u + 4.5) < 4) & (abs(v) < 2.5)) + 2 * turned(lambda u, v: (abs(u - 4.5) < 4) & (abs(v) < 2.5))
+    shapes = pixel_outlines(labels)
+    (a, _, code_a), (b, _, code_b) = buildings.straighten(shapes[1]), buildings.straighten(shapes[2])
+    assert code_a == code_b == 0
+    assert a.Distance(b) > 0.75
+
+
+def test_straighten_safety_net():
+    """A 2 x 3 m shed is too small to straighten (code 1). A disc's walls point every way, so they
+    don't agree on a direction (code 2). Both keep their outline (None)."""
+    shed = pixel_outlines(turned(lambda u, v: (abs(u) < 1.5) & (abs(v) < 1)))[1]
+    disc = pixel_outlines(turned(lambda u, v: np.hypot(u, v) < 6))[1]
+    assert buildings.straighten(shed)[::2] == (None, 1)
+    out, agree, code = buildings.straighten(disc)
+    assert (out, code) == (None, 2) and agree < buildings.STRAIGHT_AGREE
+
+
+def test_trace_fills_small_holes():
+    """A one-pixel hole in a roof (a low pixel: a skylight, a wet spot) is filled; a 2 x 2 m light
+    well stays."""
+    labels = np.zeros((80, 80), np.int32)
+    labels[10:40, 10:40] = 1
+    labels[15, 15] = 0
+    labels[25:29, 25:29] = 0
+    geom = pixel_outlines(labels)[1]
+    assert geom.GetGeometryCount() == 2  # the outer ring and the light well
+    assert geom.GetArea() == np.sum(labels == 1) * 0.25 + 0.25
+
+
+def test_tree_notch():
+    """A tree over a roof's corner: the roof outline gets a diagonal wall with tree in front of it,
+    a tree notch (~5.7 m). The same diagonal wall with ground in front of it is a real wall, and a
+    tree beside a straight wall isn't a notch either."""
+    cut = lambda u, v: BOX(u, v) & (u + v < 6)  # a corner cut off: the diagonal from (6, 0) to (2, 4)
+    crown = turned(lambda u, v: np.hypot(u - 6, v - 4) < 4.5)
+    beside = turned(lambda u, v: np.hypot(u - 9, v) < 3.5)
+    for roof, tree, notch in ((cut, crown, True), (cut, 0, False), (BOX, beside, False)):
+        seg = turned(roof)
+        seg[(tree == 1) & (seg == 0)] = 2  # the tree is object 2 (n_roofs = 1)
+        length = buildings.tree_notch(pixel_outlines(seg)[1], 1, seg, 1, 1000.0, 2040.0)
+        assert length == (pytest.approx(5.7, abs=0.5) if notch else 0)
 
 
 def scene_points():
@@ -499,6 +592,12 @@ def test_analyze_layers():
     tree, rock_crown = near(cr, 1030, 2030), near(cr, 1012, 2008)
     assert len(cr["x"]) == 2 and cr["roof_seed"][tree] == 0 and cr["roof_seed"][rock_crown] == 1
     assert "building" not in cr and "roof_seed" not in fp
+    # the house gets straight walls: 4 corners, its 10 x 12 m; the rock isn't a building. No tree
+    # notches. Only footprints have these columns.
+    assert fp["outline"][house] == 0 and fp["outline"][rock] == 5 and fp["review"].tolist() == [0, 0]
+    assert "outline" not in cr and "review" not in cr and "outline" not in out["objects"]
+    walls = ogr.CreateGeometryFromWkt(fp["geometry"][house[0]])
+    assert walls.GetGeometryRef(0).GetPointCount() == 5 and walls.GetArea() == pytest.approx(120, rel=0.02)
     assert len(near(out["objects"], 1030, 2010)) == 1  # the bush is an object, but no crown
     crown = ogr.CreateGeometryFromWkt(cr["geometry"][tree[0]])
     assert crown.Contains(ogr.CreateGeometryFromWkt("POINT (1030 2030)"))  # around the tree's top

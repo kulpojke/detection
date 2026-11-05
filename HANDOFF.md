@@ -13,17 +13,18 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 `src/buildings.py` (see "Building detection"). tilestream stays the reading layer; no
 building logic goes into it.
 
-## Status (2026-11-03)
-- **Offline suite: 55 passed** (10 network tests skipped), in about 12 s.
+## Status (2026-11-05)
+- **Offline suite: 64 passed** (10 network tests skipped), in about 12 s.
 - **The network suite was last run on 2026-10-30** (49 of 49). Since then `fetch_points`
   got the empty-area fix (`test_fetch_empty_area_keeps_fields`), and tilestream got the
   GeoPackage output. Run the full suite once (see Tests).
 - **tilestream, new since then:**
   - an analysis can return polygons (features), which become GeoPackages;
   - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
-- **buildings.py:** steps 1–4c are done. It writes footprint polygons with a `building`
+- **buildings.py:** steps 1–4d are done. It writes footprint polygons with a `building`
   code, crown polygons, and metrics per object from the points (heights, cover,
-  intensity). See "Building detection".
+  intensity). Buildings get straight walls (4d), with an `outline` code that says how each
+  polygon was made, and a `review` flag for tree notches. See "Building detection".
 - Repository: https://github.com/kulpojke/detection.
 - Earlier (2026-10-30), for reference:
   - The network test-site finder (`test/conftest.py`) picks the 500 m square at
@@ -157,8 +158,34 @@ under a building the ground is filled in from around it.
     order, which can differ per window;
   - `building` (see below).
 - **`footprints`** (GeoPackage): every roof-seeded object as a polygon, with the same
-  columns. Rejects stay in the layer, so you can see them in QGIS. Outlines come from
-  `gdal.Polygonize` and are simplified (0.5 m) only for objects of at least 25 m².
+  columns plus `outline` and `review` (below). Rejects stay in the layer, so you can see them
+  in QGIS. Outlines come from `gdal.Polygonize` (`trace()`), with holes under 1 m² filled
+  (`HOLE_FILL`; in Chewelah 109 of 120 holes, single low pixels in a roof). Buildings
+  (codes 1 and 2) get straight walls; everything else, and buildings the safety net turns
+  down, is simplified (0.5 m), but only from 25 m² up.
+- **Straightening, `straighten()`** (step 4d), per building:
+  1. Each ring of the pixel outline is cut into walls with Douglas-Peucker (`WALL_TOL`
+     0.75 m), starting at the point furthest from the centre (a real corner).
+  2. One main direction per building: each wall is fitted as a line through the middle of
+     its pixel staircase (the pixel edges as line pieces), then its angle × 4, weighted by
+     length², averaged as arrows. `agree` (0–1) says how well the walls agree on it. In a
+     second pass only the walls within 15° vote, so tree edges don't turn the building.
+  3. A wall within `SNAP_ANGLE` (15°) of the main direction, or square to it, is turned
+     onto it. A wall that doesn't snap and is shorter than `MIN_DIAGONAL` (4 m) is a ragged
+     bit or a corner cut off by the pixels: it is dropped. Longer ones stay as diagonal walls.
+  4. Neighbouring parallel walls less than 0.75 m apart become one. Neighbouring walls
+     meet where their lines cross: square walls always, a diagonal only within `MAX_SHIFT`
+     (1.5 m) of the old corner; otherwise, and for parallel walls, a jog.
+
+  Rings under 25 m² (small holes, small parts) keep their pixel outline.
+- **`outline` codes** (the safety net): 0 straightened; not straightened because 1 too small
+  (< 25 m², pixel outline), 2 the walls don't agree (`agree` < 0.7: ragged, mostly
+  tree-bitten), 3 the result wasn't a valid shape, 4 the area changed more than 10%,
+  5 not a building. Codes 2–5 get the simplified outline.
+- **`review`, `tree_notch()`:** 1 if a diagonal wall (unsnapped, ≥ 4 m) has mostly tree
+  pixels just in front of it: a tree hangs over the roof and hides part of it. In front of a
+  real wall is ground or another building. Checked against the DSM by Michael: it does "a
+  reasonable job of telling us that we should review a building".
 - **`crowns`** (GeoPackage): every object with `building` = 0 of at least 5 m²
   (`CROWN_MIN_AREA`), with `roof_seed` in place of `building`. `roof_seed` = 1 is a reject
   that is also in `footprints`; most of those are trees. Smaller tree objects are mostly loose
@@ -179,18 +206,35 @@ under a building the ground is filled in from around it.
   - a rock at (457380, 5292240), which the rule rejects (rough inside);
   - a 7.5 m² shed at (457368, 5292215);
   - a tree crown that got a roof seed at (457059, 5291980), which the rule rejects.
-- **Last results** (2026-11-03, evening):
+- **Last results** (2026-11-05, run 20):
   - Chewelah: 181 footprints (114 buildings, 45 small structures, 22 not) and 372 crowns.
-  - Nine Mile: 6 footprints (3, 1, 2) and 2,618 crowns (median 46 m², 22.6 m high).
+    Straightened: 103 of the 114 buildings (10 walls don't agree, 1 area) and 6 of the 45
+    small structures (36 too small, 3 walls don't agree). `review`: 26. The straightened
+    area differs from the pixel area by −0.1% (median; 80% within −2.2% and +1.7%). No
+    invalid polygons; no footprints touch that didn't before.
+  - Nine Mile: 6 footprints (3, 1, 2) and 2,618 crowns (median 46 m², 22.6 m high). The 3
+    buildings are straightened; the shed is too small.
   - Four 250 m windows give exactly the same rasters, objects, footprints and crowns (all
     columns) as one 500 m window. This was checked by hand; there is no automatic
     real-data seam test for buildings.py yet.
+  - Synthetic shapes turned 30° (rectangle, L, a diagonal wall, a 6 × 6 m garage, a cut
+    corner) come back with each true corner within 0.15 m (in fact 2–8 cm) and their area
+    within 2%. Simplifying made big diagonal outlines ~8% too big.
 - **Known limits:**
   - Vehicles, containers and dumpsters look like sheds from above (code 2).
   - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
     thinner than ~2.5 m. Example: the house at (446776, 5347492).
   - Thin things sticking out of a wall can become little roof spikes.
-  - Big diagonal outlines grow ~8%, because simplifying keeps the outer staircase corners.
+  - Simplified outlines (rejects, crowns, buildings the safety net turns down) of big
+    diagonal shapes grow ~8%, because simplifying keeps the outer staircase corners.
+  - **Footprints miss the roof under overhanging trees.** Straightening keeps the visible
+    roof: in Chewelah almost every diagonal wall is a tree edge, not a wall. `review` flags
+    them; it only looks at diagonal walls of 4 m or more, so a notch with right angles, or one
+    under 4 m, isn't flagged.
+  - Buildings under 25 m² keep their pixel staircase (their walls are too short to fit).
+  - At 0.5 m pixels a pixel is roof if any of its ~4 pulses hits the roof, so outlines sit
+    on average roughly 0.1 m outside the roof edge (a rough estimate: ~5% area on a 10 × 10 m
+    house). Lidar also sees the eaves, not the walls.
   - **Buildings without a roof seed are missed;** they end up in `crowns`. Examples in
     Chewelah: (447148, 5347158), (446796, 5347161), `missed_building`.
   - A roof part touching a building with 0.15–0.35 split pulses stays a "crown"; only
@@ -206,6 +250,31 @@ under a building the ground is filled in from around it.
     then a second watershed) was set aside: tried at 0.5–1.5 m, it barely changed anything.
   - **The rule applies only to roof-seeded objects.** Applying it to all objects ("option
     a") was tried and rejected: in Chewelah it added 26 footprints, many of them trees.
+  - **Straightening keeps diagonal walls** (not right angles only), and flags tree notches
+    with `review` instead of filling them in. Only buildings (codes 1 and 2) are
+    straightened. The main direction comes from the walls, not from the smallest rectangle
+    around the building: that rectangle is pulled off by bumps and tree bites (11° on a big
+    building in Chewelah).
+  - **`RES` stays 0.5 m**, even where the data are denser. At 0.25 m there is about one
+    pulse per pixel (a third of the pixels empty), and every threshold (roughness, `THIN`,
+    `multi_return`, `MIN_AREA`) would need retuning. Better: refine the walls with the
+    points (Next steps).
+- **Measured on 2026-11-04** (for later steps):
+  - Density, full-density reads: Chewelah 15.1 pulses/m² (16.2 returns), Nine Mile 12.0
+    (19.3 returns): ~3–4 pulses per 0.5 m pixel. As far as we know the EPT holds the full
+    OPR point cloud; not checked yet.
+  - **The roof under the canopy is often visible.** Under 6 flagged tree notches and 2
+    trees beside a wall, 20–55% of the pulses reach the roof or the ground. Where a roof is
+    under the crown, the last returns form a thin layer exactly on the roof facet's plane,
+    continued under the tree: at (447076, 5347170), 120 last returns within ±0.15 m of it
+    and none in the 0.3 m slabs just above and below; at (446834, 5347208), 48 against 10
+    and 0. Not everywhere: under the dense crown at (446960, 5347018) there is no such
+    layer, and at (447157, 5347292) the tree stands mostly on ground (no notch after all).
+    The two trees beside a wall had a layer too (98 and 52): they also hang over the roof
+    edge, so there the footprint ends where the tree starts. Method: fit a plane to the
+    roof's first returns within 1.5 m of the wall (four rounds, each dropping the points more
+    than 0.3 m off), continue it under the tree pixels within 2 m of the wall, and count the
+    last returns there by their height above it.
 
 ## Tests
 Run from the project root, inside a memory cap:
@@ -216,7 +285,7 @@ Run from the project root, inside a memory cap:
 
 `test/README.md` explains every test, and how to check that a new test fails without its fix.
 
-- **`test/test_tilestream.py`** (offline, 55 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 64 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -226,8 +295,10 @@ Run from the project root, inside a memory cap:
   - run, merge, resume, settings guard, empty-window skipping
   - GeoPackage output and codes, through merge
   - buildings.py: segmentation, `reclaim_roof` (each step, and objects in one piece),
-    outlines, `roughness_inside`, point metrics (independent of point order), the rule,
-    the codes, and the whole `analyze()` on a synthetic scene (which layer gets what)
+    outlines and hole filling, straightening (turned shapes, neighbours 1 m apart, the
+    safety net), the tree-notch flag, `roughness_inside`, point metrics (independent of
+    point order), the rule, the codes, and the whole `analyze()` on a synthetic scene
+    (which layer gets what)
   - the `--exec` contract (arguments, environment variables, PATH, output handling, failure)
   - seam tests for both the Python analysis and `example_dsm.sh`
 - **`test/test_ept.py`** (marked `network`, skipped without `--ept`): no hardcoded
@@ -287,7 +358,18 @@ Run from the project root, inside a memory cap:
 
    Ask Michael for a few of the trees from the rejected run, to see what tells them apart.
 3. Later for buildings:
-   - straighten outlines (4d);
+   - **Refine the walls with the points.** Move each straightened wall to the boundary
+     between the outermost roof points and the first ground points in front of it. A 10 m
+     wall has ~70 edge pulses at 15/m², so it can be placed to a few cm instead of ±0.25 m.
+     This removes the ~0.1 m outward bias and gets better wherever the data are denser,
+     without changing `RES`.
+   - **Roof under the canopy.** A tree pixel next to a roof becomes roof where its last
+     returns form a thin layer on the roof facet's continued plane (see "Measured on
+     2026-11-04"). That would fill tree notches instead of only flagging them, and be a
+     sharper notch test. Caveats: 8 examples so far, and it assumes the facet continues
+     under the tree with the same slope.
+   - Check that the EPT holds the full OPR point cloud: count one OPR LAZ tile's points in
+     Chewelah against an EPT read of the same box.
    - a real-data seam test for buildings.py (a network test);
    - a clue for vehicles and containers (context, or a second scan);
    - the `reclaim_roof` thin-neck case.
