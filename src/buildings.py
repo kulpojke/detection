@@ -26,7 +26,9 @@ by a watershed on the ndsm. The flood starts from two kinds of seeds:
               like roofs: few split pulses, smooth. One seed per roof, so ridges and dormers
               don't cut a building into pieces. The seed is only the hole's pixels that look
               like roof themselves (in pieces of at least MIN_AREA): a dense crown next to a
-              building also hides the ground, and must not end up in the roof.
+              building also hides the ground, and must not end up in the roof. Such a crown
+              can make the hole fail as a whole; then only its roof-like pieces of at least
+              ROOF_PIECE seed it.
   tree tops   local maxima of the lightly smoothed ndsm, away from the roof seeds
 Each high pixel joins the seed it is "downhill" from, so boundaries fall in the valleys
 between crowns and roofs. Then tree pixels that are really roof go to the nearest roof: whole
@@ -93,6 +95,8 @@ HOLE_GAP = 0.5          # m: no ground point in the pixel or its 4 neighbours
 MIN_AREA = 1.0          # m^2; a 2 x 3 m shed's covered hole is ~2 m^2
 ROOF_MULTI = 0.15       # a roof seed has a smaller share of split pulses than this,
 ROOF_ROUGH = 0.5        # and a median roughness below this (m)
+ROOF_PIECE = 20         # m^2: a hole that fails that as a whole (it runs on under trees) is seeded from its
+                        # roof-like pieces of at least this (Chewelah: 8 of 2,297 such holes, 5 of them roofs)
 TREE_SMOOTH = 0.5       # m, Gaussian smoothing of the ndsm before finding tree tops
 TREE_TOP_RADIUS = 2.5   # m, a tree top is the highest point within this distance; 1.5 m split
                         # big crowns into 2-3 pieces
@@ -210,18 +214,25 @@ def segment(g):
     pieces, _ = ndimage.label((holes > 0) & (g["multi_return"] < ROOF_MULTI) & (g["roughness"] < ROOF_ROUGH))
     for _, r, c in pixels(holes):
         f = describe(r, c, g)
+        sizes = np.bincount(pieces[r, c]) * RES ** 2
+        sizes[0] = 0  # pixels that aren't roof-like
+        size = sizes[pieces[r, c]]  # each pixel's piece size
         if f["area"] >= MIN_AREA and f["multi_return"] < ROOF_MULTI and f["roughness"] < ROOF_ROUGH:
             # seed only the hole's roof-like pieces (of at least MIN_AREA, not stray pixels in a
             # crown): a dense crown next to a building also hides the ground, so the hole often
             # runs on under the tree. All pieces, not just the largest: steps between roof
             # sections split pulses too, and cut the roof-like part apart.
-            sizes = np.bincount(pieces[r, c]) * RES ** 2
-            sizes[0] = 0  # pixels that aren't roof-like
-            keep = sizes[pieces[r, c]] >= MIN_AREA
+            keep = size >= MIN_AREA
             if not keep.any():  # a shed is nearly all edge, which splits pulses and is rough:
                 keep[:] = True  # its roof-like pixels are stray ones, so seed the whole hole
-            n_roofs += 1
-            roofs[r[keep], c[keep]] = n_roofs
+        else:
+            # where the hole runs on under trees, the trees can make it fail as a whole: then
+            # only big roof-like pieces seed it (a dense crown's smooth bits are smaller)
+            keep = size >= ROOF_PIECE
+            if not keep.any():
+                continue
+        n_roofs += 1
+        roofs[r[keep], c[keep]] = n_roofs
 
     smooth = ndimage.gaussian_filter(np.where(high, g["ndsm"], 0), TREE_SMOOTH / RES)
     peak = smooth == ndimage.maximum_filter(smooth, 2 * round(TREE_TOP_RADIUS / RES) + 1)

@@ -133,6 +133,12 @@ Two helpers make the fake lidar:
 - `test_segment_seeds_small_shed`: on a 2 x 3 m shed every pixel is near the edge, so no
   pixel looks like roof by itself (high 3 x 3 `multi_return`). The whole hole is then the
   seed, and the shed is still a roof.
+- `test_segment_seeds_roof_in_hole_under_tree`: a dense tree against a house hides the ground
+  too, so the house's covered hole runs on under the tree, and over the whole hole too many
+  pulses split (the test checks that). The house is still seeded from its roof-like piece of
+  at least `ROOF_PIECE` and stays a roof, and the tree stays a tree. A dense crown on its own,
+  with a smooth 9 m² bit at its top, gets no seed. Fails without the second route, when small
+  pieces seed too, and when the whole hole becomes the seed.
 - `test_is_building`: the rule, on real objects from Nine Mile Falls and Chewelah: the house
   and the shed are buildings; a crown with a roof seed (split pulses, rough) and the rock
   (rough inside) are not. A 16 m² bush (0.36 inside) fails, because small objects must be

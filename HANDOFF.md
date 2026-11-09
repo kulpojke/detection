@@ -1,7 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-09 (Claude, after `cover_min`, the vehicle clue, and the labelled
-seedless candidates)._
+_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE` and the labelled
+seedless candidates and run 22)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -14,7 +14,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-09)
-- **Offline suite: 65 passed** (10 network tests skipped), in about 13 s.
+- **Offline suite: 66 passed** (10 network tests skipped), in about 13 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
@@ -133,7 +133,9 @@ under a building the ground is filled in from around it.
   - `segments`: 1 roof, 2 tree.
 - **`segment()`:** a watershed on the ndsm, from two kinds of seeds:
   - **roof seeds:** the roof-like pieces of covered holes. A shed without such a piece
-    is seeded with its whole hole.
+    is seeded with its whole hole. A hole that fails the roof test as a whole (because it
+    runs on under trees) is seeded from its roof-like pieces of at least `ROOF_PIECE`
+    (20 m²) only; without such a piece it gets no seed (added 2026-11-09).
   - **tree tops:** local maxima within 2.5 m.
 
   Patches without a seed get one at their highest pixel. Afterwards `reclaim_roof()`
@@ -237,6 +239,21 @@ under a building the ground is filled in from around it.
   columns, plus `cover_min`. One exception: a ~4,600 m² building on the site's east edge,
   which run 20 cut off where its area ended (447,300). `cover_min`: at least 0.59 for
   buildings and 0.44 for small structures; 8 of the 372 crowns are under 0.2.
+- **Run 22** (2026-11-09, both sites, 250 m windows as in run 20, with `ROOF_PIECE`):
+  - Chewelah: 189 footprints (8 new, 1 changed, none gone) and 366 crowns. Checked by
+    Michael over NAIP (`tmp_symlinks/new_footprints_run22.geojson`, column `what`):
+    - 6 are buildings that were missed: fp16, fp19, fp21, fp120, fp123, fp151 (the 3
+      unknown holes among them);
+    - fp175 is building A in one piece, but unsure: its lower part may be a yard raised by a
+      retaining wall (see Known limits);
+    - fp29 (446778, 5347109) is a hedgerow.
+  - fp16 includes a 31 m² roof-like piece under the labelled "tree pair". NAIP shows it isn't
+    green (NDVI −0.17, like the house's −0.20), so it is roof. fp20 grew 39 → 40 m² and so went
+    from code 2 to 1.
+  - The "DSM suggests building" piece is a roof object now, but its point (the hole's deepest
+    pixel, y = 5347503.8) is just past the site's north edge, so no window of this run keeps
+    it. A larger run would.
+  - Nine Mile: the same footprints; one crown changed a little.
 - **Known limits:**
   - Vehicles, containers and dumpsters look like sheds from above (code 2). A vehicle that
     moved between flight lines gets `cover_min` ~0, but it rarely becomes a footprint anyway:
@@ -256,12 +273,20 @@ under a building the ground is filled in from around it.
   - At 0.5 m pixels a pixel is roof if any of its ~4 pulses hits the roof, so outlines sit
     on average roughly 0.1 m outside the roof edge (a rough estimate: ~5% area on a 10 × 10 m
     house). Lidar also sees the eaves, not the walls.
-  - **Buildings without a roof seed are missed;** they end up in `crowns`. Examples in
-    Chewelah: (447148, 5347158), (446796, 5347161), `missed_building`. The cause (found
-    2026-11-09): `segment()` judges a covered hole as a whole, and these holes run on under
-    neighbouring trees (up to 432 m² for a 135 m² building). The whole hole then has 0.18–0.29
-    split pulses (limit 0.15) and gets no seed, although it holds roof-like pieces of
-    30–95 m². Being fixed (Next steps 1).
+  - **Buildings without a roof seed were missed** and ended up in `crowns`, e.g. in
+    Chewelah (447148, 5347158), (446796, 5347161), `missed_building`. The cause (found
+    2026-11-09): `segment()` judged a covered hole only as a whole, and these holes run on
+    under neighbouring trees (up to 432 m² for a 135 m² building). The whole hole then has
+    0.18–0.29 split pulses (limit 0.15) and got no seed, although it holds roof-like pieces of
+    30–95 m². Fixed with `ROOF_PIECE` (run 22). A building whose roof-like pieces are all
+    under 20 m² is still missed.
+  - **A dense, trimmed hedge looks like a flat roof** (fp29 in run 22: few split pulses,
+    smooth, 3.4 m wide, 2.2 m deep, like the smaller buildings). Only NAIP shows it: NDVI
+    0.34–0.40, while every other building over 60 m² in Chewelah is at 0.13 or less.
+  - **A terrace on a steep slope may look like a flat roof** (perhaps fp175: a flat surface at
+    518 m, 8 m above the street to its south and east, 2 m below the slope to its north). If
+    the ground classification marks a terrace as "not ground", it leaves a covered hole like
+    a roof. Lidar alone can't tell it from a building dug into the hillside.
   - A roof part touching a building with 0.15–0.35 split pulses stays a "crown"; only
     parts under 0.15 are merged into the roof. Example: "edge of building" (446926,
     5347442), 0.17, against footprint 64. Measured on run 20's crowns (≥ 25 m², touching a
@@ -322,9 +347,10 @@ under a building the ground is filled in from around it.
     ≥ 0.50.
   - **Why the building pieces have no seed:** see Known limits. Judging each hole by its
     roof-like pieces instead: of the 2,297 holes in Chewelah without a seed, only 8 have a
-    roof-like piece of ≥ 20 m². 5 are labelled buildings; 3 are unknown, at (447149, 5347185),
-    (446778, 5347165) and (446778, 5347099). The "DSM suggests building" piece lies just
-    past the site edge.
+    roof-like piece of ≥ 20 m². 5 are labelled buildings; 3 were unknown, at (447149, 5347185),
+    (446778, 5347165) and (446778, 5347099). In run 22, Michael found the first two to be
+    buildings and the third a hedgerow. The "DSM suggests building" piece lies just past the
+    site edge.
   - **NAIP** for Chewelah, the site plus 50 m: `tmp_symlinks/naip/naip_chewelah_2021.tif`
     (2021-07-10) and `..._2023.tif` (2023-07-01). Washington has no 2022 NAIP. They are
     0.6 m, 4 bands (R, G, B, near-infrared; bands 4-1-2 show vegetation in red), cut from
@@ -347,7 +373,7 @@ until that file changes) and runs the network tests only
 (`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
 that is still going. The offline tests don't run in CI yet. The first run (2026-11-05) passed.
 
-- **`test/test_tilestream.py`** (offline, 65 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 66 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -418,18 +444,24 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
 
 ## Next steps
-1. **Buildings without a roof seed** (agreed with Michael 2026-11-09). In `segment()`, a
-   hole that fails the whole-hole test still gets a seed from its roof-like pieces of at
-   least 20 m² (`ROOF_PIECE`). Today's seeds stay as they are. One seed per hole, so building
-   A's two pieces at (447184–447193, 5347323) become one object; the rule then judges it as
-   usual. Test it, run both sites again, compare with run 21, and check every changed
-   footprint (NAIP), including the 3 unknown holes.
-2. **The merge limit in `reclaim_roof`:** whole "tree" objects touching a roof are merged
-   below 0.2 split pulses instead of 0.15 (not 0.3: see Known limits). Same checks.
-3. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
+1. **The merge limit in `reclaim_roof`** (agreed with Michael 2026-11-09): whole "tree"
+   objects touching a roof are merged below 0.2 split pulses instead of 0.15 (not 0.3: see
+   Known limits). Test it, run both sites again, compare with run 22, and check every
+   changed footprint.
+2. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
    recovery set) on a 300 m box, and check `GpsTime` of the pre-fire tiles used (B4's and
    B2's official windows run past 2018-11-08).
-4. Later for buildings:
+3. Later for buildings:
+   - **NAIP as a review column** (agreed with Michael 2026-11-09), e.g. `green_share`: the
+     share of pixels with NDVI above ~0.25 inside the footprint shrunk by 1–2 m, from the
+     NAIP nearest in time. Only from ~25 m², as a flag (like `review`), not a verdict, and
+     optional, so buildings.py still works without it. Why: colour catches what the shape
+     can't (hedges, smooth trees, green yards). Caveats: NAIP is orthorectified to the
+     ground, so roofs and trees lean (a 5 m roof shifts 1–2 m near a frame's edge, a 20 m
+     tree 5–8 m), and its position is only good to a few metres; a different date; shadows;
+     colours differ between years (2023 is much brighter than 2021). Test it first on the
+     labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
+     alone doesn't separate the hedge (fp120, a building, is brighter).
    - Use `cover_min` in the rule (e.g. to keep vehicles out of a seedless rule, or out of
      code 2). It can't see vehicles that were parked through all passes.
    - **Refine the walls with the points.** Move each straightened wall to the boundary

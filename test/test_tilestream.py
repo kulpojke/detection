@@ -335,6 +335,29 @@ def test_segment_seeds_small_shed():
     assert n_roofs == 1 and (segments[shed] == 1).all()
 
 
+def test_segment_seeds_roof_in_hole_under_tree():
+    """A dense tree beside a house hides the ground too, so the house's covered hole runs on
+    under it, and over the whole hole too many pulses split. The house is still seeded, from
+    its roof-like piece of ROOF_PIECE or more. A dense crown on its own, with a smooth bit of
+    9 m^2 at its top, gets no seed."""
+    y, x = np.mgrid[0:60, 0:60]
+    house = (y >= 10) & (y < 30) & (x >= 10) & (x < 30)  # a flat 10 x 10 m roof, 4 m high
+    cone = 10 - 0.8 * np.hypot(x - 38, y - 20)  # a tree against the house's right wall
+    crown = cone > np.where(house, 4, 2.5)
+    cone2 = 9 - 0.6 * np.hypot(x - 15, y - 48)  # a crown on its own, further down
+    crown2 = cone2 > 2.5
+    smooth = np.hypot(x - 15, y - 48) < 3.4  # its smooth top, ~9 m^2
+    ndsm = np.select([crown, crown2, house], [cone, cone2, 4], 0).astype(np.float32)
+    split = ((crown | crown2) & ~smooth).astype(np.float32)  # the crowns split pulses
+    g = {"ndsm": ndsm, "ground_gap": np.where(ndsm > 2, 2, 0).astype(np.float32),  # no ground under any
+         "multi_return": split, "roughness": split, "pulses": np.ones((60, 60)), "split": split}
+    whole = buildings.describe(*np.nonzero((house | crown) & (ndsm > 2)), g)
+    assert whole["multi_return"] > buildings.ROOF_MULTI  # the hole fails as a whole
+    segments, n_roofs = buildings.segment(g)
+    assert n_roofs == 1 and (segments[house & ~crown] == 1).all()  # the house is a roof
+    assert segments[20, 38] > 1 and segments[48, 15] > 1  # both trees are trees
+
+
 def test_is_building():
     """The rule on real objects from Nine Mile Falls and Chewelah (bush, big house), and edge cases."""
     t = {k: np.array(v, dtype=float) for k, v in {
