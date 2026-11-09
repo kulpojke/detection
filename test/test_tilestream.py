@@ -209,8 +209,9 @@ def synthetic_points(bounds):
     xs, ys = xs[(xs >= x0) & (xs < x1)], ys[(ys >= y0) & (ys < y1)]
     X, Y = (v.ravel() for v in np.meshgrid(xs, ys))
     a = np.zeros(len(X), dtype=[("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"),
-                                ("Classification", "u1"), ("ReturnNumber", "u1"), ("NumberOfReturns", "u1")])
-    a["X"], a["Y"], a["Intensity"] = X, Y, 100
+                                ("Classification", "u1"), ("ReturnNumber", "u1"), ("NumberOfReturns", "u1"),
+                                ("PointSourceId", "u2")])
+    a["X"], a["Y"], a["Intensity"], a["PointSourceId"] = X, Y, 100, 1
     a["Z"] = 600 + 0.05 * (X - 500000) + 10 * np.cos(2 * np.pi * X / 37) * np.cos(2 * np.pi * Y / 41)  # 5% slope
     a["ReturnNumber"] = a["NumberOfReturns"] = 1
     noise = (np.round(X / SPACING) * 7919 + np.round(Y / SPACING) * 104729) % 997 == 0  # by location, not index
@@ -366,6 +367,25 @@ def test_point_metrics():
     o = np.random.default_rng(0).permutation(len(h))
     shuffled = buildings.point_metrics(h[o], first[o], intensity[o], label[o], np.array([1, 2]))
     assert all(np.array_equal(m[k], shuffled[k], equal_nan=True) for k in m)
+
+
+def test_cover_min():
+    """The vehicle clue. Object 1, a vehicle, is there in line 7 and gone in line 9. Object 2, a
+    building, is there in both; line 12 only grazes it (1 of its 4 pixels) and sees the ground
+    beyond its edge, so it doesn't count; its second return isn't a first return. Object 3 has
+    no points."""
+    #               vehicle: line 7    line 9 | building: line 7   line 9      2nd    line 12 | none
+    pixel = np.array([10, 11,          10, 11,  20, 21, 22, 23,   20, 21, 22, 23, 21,    23,     30])
+    source = np.array([7, 7,           9, 9,    7, 7, 7, 7,       9, 9, 9, 9,     9,     12,     9])
+    h = np.array([2.5, 2.5,           0.1, 0.1, 3, 3, 3, 3,       3, 3, 3, 3,     0,     0.2,    0])
+    label = np.array([1, 1,            1, 1,    2, 2, 2, 2,       2, 2, 2, 2,     2,     2,      0])
+    first = label >= 0
+    first[12] = False
+    rows = np.array([1, 2, 3])
+    c = buildings.cover_min(h, first, label, pixel, source, rows)
+    assert c[0] == 0 and c[1] == 1 and np.isnan(c[2])
+    o = np.random.default_rng(0).permutation(len(h))
+    assert np.array_equal(buildings.cover_min(h[o], first[o], label[o], pixel[o], source[o], rows), c, equal_nan=True)
 
 
 def test_describe_roughness_inside():
@@ -568,7 +588,8 @@ def scene_points():
     tree, rock = d_tree < 4, d_rock < 3
     bush = (abs(x - 1030) < 0.5) & (abs(y - 2010) < 0.75)
     pts = np.zeros(len(x), [("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"), ("Classification", "u1"),
-                            ("ReturnNumber", "u1"), ("NumberOfReturns", "u1")])
+                            ("ReturnNumber", "u1"), ("NumberOfReturns", "u1"), ("PointSourceId", "u2")])
+    pts["PointSourceId"] = 1  # one flight line
     pts["X"], pts["Y"] = x, y
     pts["Z"] = np.select([house, tree, rock, bush], [4, 12 - 2.5 * d_tree, 4 * (1 - (d_rock / 3) ** 2), 3], 0)
     pts["Intensity"] = np.select([house, tree], [200, 300], 100)
@@ -605,6 +626,7 @@ def test_analyze_layers():
     # metrics from the points: the house is a flat 4 m roof; the tree's highest point is 12 m minus
     # its distance to the middle (0.18 m on the 0.25 m lattice) x 2.5, and its first returns have intensity 300
     assert fp["top"][house] == 4 and fp["h_std"][house] == 0 and fp["cover"][house] == 1 and fp["i_mean"][house] == 200
+    assert fp["cover_min"][house] == 1  # one flight line: the same as cover
     assert cr["top"][tree] == pytest.approx(12 - 2.5 * np.hypot(0.125, 0.125)) and cr["i_mean"][tree] == 300
     assert cr["cover"][tree] > 0.9  # a few edge pixels also hold ground hits
 

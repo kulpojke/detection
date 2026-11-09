@@ -1,7 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-03, evening (Claude, after the crowns layer, the point metrics and
-the `reclaim_roof` fixes)._
+_Last updated 2026-11-09 (Claude, after `cover_min`, the vehicle clue, and the labelled
+seedless candidates)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -13,18 +13,24 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 `src/buildings.py` (see "Building detection"). tilestream stays the reading layer; no
 building logic goes into it.
 
-## Status (2026-11-05)
-- **Offline suite: 64 passed** (10 network tests skipped), in about 12 s.
-- **The network suite was last run on 2026-10-30** (49 of 49). Since then `fetch_points`
-  got the empty-area fix (`test_fetch_empty_area_keeps_fields`), and tilestream got the
-  GeoPackage output. It now runs in CI on every push (see Tests); check the first run.
+## Status (2026-11-09)
+- **Offline suite: 65 passed** (10 network tests skipped), in about 13 s.
+- **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
+  commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
+- **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
+  `camp_lidar_memo.md` lists the pre-fire (Jul 2018), post-fire (2019) and recovery (Nov
+  2021) 3DEP sets, all with EPTs. Paradise pre-fire is only in
+  `USGS_LPC_CA_NoCAL_Wildfires_B4_2018`, which is **QL2** (≥ 2 pulses/m²), while the
+  thresholds here were tuned at 12–15 pulses/m². tilestream already reads these EPTs (they
+  are EPSG:3857 like WA; the default CRS becomes NAD83(2011) UTM 10N).
 - **tilestream, new since then:**
   - an analysis can return polygons (features), which become GeoPackages;
   - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
 - **buildings.py:** steps 1–4d are done. It writes footprint polygons with a `building`
   code, crown polygons, and metrics per object from the points (heights, cover,
-  intensity). Buildings get straight walls (4d), with an `outline` code that says how each
-  polygon was made, and a `review` flag for tree notches. See "Building detection".
+  intensity, and `cover_min`, the vehicle clue). Buildings get straight walls (4d), with an
+  `outline` code that says how each polygon was made, and a `review` flag for tree notches.
+  See "Building detection".
 - Repository: https://github.com/kulpojke/detection.
 - Earlier (2026-10-30), for reference:
   - The network test-site finder (`test/conftest.py`) picks the 500 m square at
@@ -151,9 +157,15 @@ under a building the ground is filled in from around it.
     - `n_points`;
     - `top`, `h_mean`, `h_std`, `h_p50`, `h_p95`: the returns above 2 m;
     - `cover`: the share of first returns above 2 m;
-    - `i_mean`, `i_std`: the intensity of the first returns above 2 m.
+    - `i_mean`, `i_std`: the intensity of the first returns above 2 m;
+    - `cover_min` (`cover_min()`, added 2026-11-09): the lowest `cover` of any one flight
+      line (`PointSourceId`). A vehicle that came or went between two passes is there in
+      one line and gone in another (cover ~0 there); a building is there in every line.
+      Only lines that reach at least half of the object's pixels count
+      (`COVER_LINE_SHARE`): a line that grazes the object sees only its edge.
 
-    This needs `Intensity`; tilestream reads every field unless `--dims` says otherwise.
+    This needs `Intensity` and `PointSourceId`; tilestream reads every field unless `--dims`
+    says otherwise.
     Heights are sorted per object before summing, so the result doesn't depend on point
     order, which can differ per window;
   - `building` (see below).
@@ -220,8 +232,17 @@ under a building the ground is filled in from around it.
   - Synthetic shapes turned 30° (rectangle, L, a diagonal wall, a 6 × 6 m garage, a cut
     corner) come back with each true corner within 0.15 m (in fact 2–8 cm) and their area
     within 2%. Simplifying made big diagonal outlines ~8% too big.
+- **Run 21** (2026-11-09, Chewelah, with `cover_min`; default 1 km windows, so it covers
+  2 km²): inside the site, the same 181 footprints and 372 crowns as run 20, with the same
+  columns, plus `cover_min`. One exception: a ~4,600 m² building on the site's east edge,
+  which run 20 cut off where its area ended (447,300). `cover_min`: at least 0.59 for
+  buildings and 0.44 for small structures; 8 of the 372 crowns are under 0.2.
 - **Known limits:**
-  - Vehicles, containers and dumpsters look like sheds from above (code 2).
+  - Vehicles, containers and dumpsters look like sheds from above (code 2). A vehicle that
+    moved between flight lines gets `cover_min` ~0, but it rarely becomes a footprint anyway:
+    the other lines saw the ground under it, so it leaves no covered hole and gets no roof
+    seed. A vehicle parked through all passes looks like a shed, `cover_min` included.
+    `cover_min` isn't used by the rule yet.
   - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
     thinner than ~2.5 m. Example: the house at (446776, 5347492).
   - Thin things sticking out of a wall can become little roof spikes.
@@ -236,9 +257,21 @@ under a building the ground is filled in from around it.
     on average roughly 0.1 m outside the roof edge (a rough estimate: ~5% area on a 10 × 10 m
     house). Lidar also sees the eaves, not the walls.
   - **Buildings without a roof seed are missed;** they end up in `crowns`. Examples in
-    Chewelah: (447148, 5347158), (446796, 5347161), `missed_building`.
+    Chewelah: (447148, 5347158), (446796, 5347161), `missed_building`. The cause (found
+    2026-11-09): `segment()` judges a covered hole as a whole, and these holes run on under
+    neighbouring trees (up to 432 m² for a 135 m² building). The whole hole then has 0.18–0.29
+    split pulses (limit 0.15) and gets no seed, although it holds roof-like pieces of
+    30–95 m². Being fixed (Next steps 1).
   - A roof part touching a building with 0.15–0.35 split pulses stays a "crown"; only
-    parts under 0.15 are merged into the roof.
+    parts under 0.15 are merged into the roof. Example: "edge of building" (446926,
+    5347442), 0.17, against footprint 64. Measured on run 20's crowns (≥ 25 m², touching a
+    building): a limit of 0.2 would merge 2 in Chewelah (that one and an unknown 35 m², 3.7 m
+    high piece at (447099, 5347393)); 0.3 would merge 9, of which 4 are clearly trees (8–14 m
+    high, up to 327 m²). Nine Mile: none either way, because its crowns have 0.5+. Chewelah's
+    trees split much less (25% of its crowns ≥ 25 m² are under 0.32), so the risk depends on
+    the forest.
+  - A pile of logs is a footprint (Chewelah 142, ~(447110, 5347018), 158 m²): it looks like a
+    roof on every feature. Left alone for now.
   - A few footprints have a one-pixel part that touches the roof only at a corner.
   - Neighbouring crowns are simplified one by one, so their shared edges can differ a
     little.
@@ -275,6 +308,29 @@ under a building the ground is filled in from around it.
     roof's first returns within 1.5 m of the wall (four rounds, each dropping the points more
     than 0.3 m off), continue it under the tree pixels within 2 m of the wall, and count the
     last returns there by their height above it.
+- **Measured and labelled on 2026-11-06 to 11-09:**
+  - **Seedless candidates, labelled by Michael:** the 24 crowns of run 20 that have no roof
+    seed but pass the rule ("option a" again), in `tmp_symlinks/seedless_candidates_chewelah.geojson`
+    (column `what`; local only, since `tmp_symlinks/` isn't in git). The big ones (≥ 47 m²):
+    8 building pieces with 0.06–0.17 split pulses, and 1 tree pair with 0.26. The small ones
+    (≤ 21 m²): 6 vehicles, bushes, a utility box, part of a log pile, unknown man-made
+    things, and one small building or shed (446757, 5347286; 6.5 m²).
+  - **Chewelah was flown in 4 lines:** `PointSourceId` 356, 357 and 358 on 2022-07-16
+    (20:36, 20:41, 21:00 UTC), and 400 on 2022-07-19. Each moving vehicle is there in one
+    line only (cover 0.70–0.91 there, 0.00 in the others); one came and went within that
+    evening. Every footprint has cover ≥ 0.44 in every line. A parked car that stayed has
+    ≥ 0.50.
+  - **Why the building pieces have no seed:** see Known limits. Judging each hole by its
+    roof-like pieces instead: of the 2,297 holes in Chewelah without a seed, only 8 have a
+    roof-like piece of ≥ 20 m². 5 are labelled buildings; 3 are unknown, at (447149, 5347185),
+    (446778, 5347165) and (446778, 5347099). The "DSM suggests building" piece lies just
+    past the site edge.
+  - **NAIP** for Chewelah, the site plus 50 m: `tmp_symlinks/naip/naip_chewelah_2021.tif`
+    (2021-07-10) and `..._2023.tif` (2023-07-01). Washington has no 2022 NAIP. They are
+    0.6 m, 4 bands (R, G, B, near-infrared; bands 4-1-2 show vegetation in red), cut from
+    tile `m_4811743_sw_11_060` on Microsoft Planetary Computer without resampling, in EPSG:26911.
+  - The scripts are in the session scratchpad (`vehicle_clue.py`, `why_no_seed.py`,
+    `holes_count.py`), which is temporary.
 
 ## Tests
 Run from the project root, inside a memory cap:
@@ -289,9 +345,9 @@ Run from the project root, inside a memory cap:
 push, and by hand from the Actions tab, GitHub builds the env from `environment.yml` (cached
 until that file changes) and runs the network tests only
 (`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
-that is still going. The offline tests don't run in CI yet.
+that is still going. The offline tests don't run in CI yet. The first run (2026-11-05) passed.
 
-- **`test/test_tilestream.py`** (offline, 64 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 65 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -302,8 +358,8 @@ that is still going. The offline tests don't run in CI yet.
   - GeoPackage output and codes, through merge
   - buildings.py: segmentation, `reclaim_roof` (each step, and objects in one piece),
     outlines and hole filling, straightening (turned shapes, neighbours 1 m apart, the
-    safety net), the tree-notch flag, `roughness_inside`, point metrics (independent of
-    point order), the rule, the codes, and the whole `analyze()` on a synthetic scene
+    safety net), the tree-notch flag, `roughness_inside`, point metrics and `cover_min`
+    (independent of point order), the rule, the codes, and the whole `analyze()` on a synthetic scene
     (which layer gets what)
   - the `--exec` contract (arguments, environment variables, PATH, output handling, failure)
   - seam tests for both the Python analysis and `example_dsm.sh`
@@ -359,18 +415,23 @@ that is still going. The offline tests don't run in CI yet.
 - `environment.yml`: the conda env, with pinned versions.
 - `.github/workflows/network-tests.yml`: CI, the network tests on every push.
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
+- `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
 
 ## Next steps
-1. Check the first CI run of the network suite (GitHub Actions; not run since 2026-10-30).
-   If it fails, find out whether it is the code or a difference between CI and the local
-   machine.
-2. Buildings without a roof seed. Two ways to tackle it:
-   - find out why they get no seed;
-   - or use a much stricter rule for seedless objects only, e.g. split pulses < 0.15. The
-     examples have 0.06–0.10.
-
-   Ask Michael for a few of the trees from the rejected run, to see what tells them apart.
-3. Later for buildings:
+1. **Buildings without a roof seed** (agreed with Michael 2026-11-09). In `segment()`, a
+   hole that fails the whole-hole test still gets a seed from its roof-like pieces of at
+   least 20 m² (`ROOF_PIECE`). Today's seeds stay as they are. One seed per hole, so building
+   A's two pieces at (447184–447193, 5347323) become one object; the rule then judges it as
+   usual. Test it, run both sites again, compare with run 21, and check every changed
+   footprint (NAIP), including the 3 unknown holes.
+2. **The merge limit in `reclaim_roof`:** whole "tree" objects touching a roof are merged
+   below 0.2 split pulses instead of 0.15 (not 0.3: see Known limits). Same checks.
+3. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
+   recovery set) on a 300 m box, and check `GpsTime` of the pre-fire tiles used (B4's and
+   B2's official windows run past 2018-11-08).
+4. Later for buildings:
+   - Use `cover_min` in the rule (e.g. to keep vehicles out of a seedless rule, or out of
+     code 2). It can't see vehicles that were parked through all passes.
    - **Refine the walls with the points.** Move each straightened wall to the boundary
      between the outermost roof points and the first ground points in front of it. A 10 m
      wall has ~70 edge pulses at 15/m², so it can be placed to a few cm instead of ±0.25 m.
@@ -384,11 +445,10 @@ that is still going. The offline tests don't run in CI yet.
    - Check that the EPT holds the full OPR point cloud: count one OPR LAZ tile's points in
      Chewelah against an EPT read of the same box.
    - a real-data seam test for buildings.py (a network test);
-   - a clue for vehicles and containers (context, or a second scan);
    - the `reclaim_roof` thin-neck case.
    - Point metrics are on by a constant (`POINT_METRICS`). In a final command-line version
      they might become an option; tilestream has no way yet to pass options to an analysis.
-4. Decide the permanent fix for the `~/.local` packages (see Environment).
-5. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
+5. Decide the permanent fix for the `~/.local` packages (see Environment).
+6. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
    then go larger (`--list` or `--all`, in chunks or overnight). Measure memory first for
    larger windows.

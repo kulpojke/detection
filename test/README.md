@@ -185,12 +185,18 @@ Two helpers make the fake lidar:
   10 x 12 m; this caught a bug where a wall that is a single pixel edge had no direction), the
   rock `outline` 5 (not a building), neither a `review` flag; only footprints have these
   columns. The tree's polygon lies around its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
-  its intensity), and the tree's `top` is its highest point, with its own intensity.
+  its intensity, and `cover_min` 1: the scene has one flight line), and the tree's `top` is its
+  highest point, with its own intensity.
 - `test_point_metrics`: heights, cover and intensity per object from a handful of points,
   including a return under `MIN_HEIGHT` (counts for `cover`, not for heights), a second
   return (counts for heights, not for intensity), and an object with nothing above
   `MIN_HEIGHT` (NaN). Shuffled points give exactly the same result: the points can arrive in
   another order in each window.
+- `test_cover_min`: the vehicle clue, the lowest cover of one flight line. A "vehicle" there in
+  one line and gone in the other gets 0. A "building" there in both gets 1, while a third line
+  that reaches only 1 of its 4 pixels (it grazes the edge and sees the ground) doesn't count, and
+  neither does a second return. An object without points gets NaN. Shuffled points give the
+  same result.
 
 **--exec analyses** (a shell command per window instead of a Python function)
 - `test_exec_contract`: what the command gets. The arguments are its own, then the LAZ

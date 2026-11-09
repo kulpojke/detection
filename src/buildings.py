@@ -45,7 +45,8 @@ point keeps the row. Columns:
   building (the rule's verdict, CODES: 0 = not a building, 1 = building, 2 = shed, container
   or RV, a building under SMALL_STRUCTURE), and with POINT_METRICS the metrics from the
   object's points: n_points, top, h_mean, h_std, h_p50, h_p95, cover, i_mean, i_std (see
-  point_metrics)
+  point_metrics), and cover_min (the lowest cover of one flight line: about 0 for a vehicle
+  that came or went between two passes; see cover_min)
 
 Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the same columns
 (without roof_seed) and two more:
@@ -68,8 +69,8 @@ CROWN_MIN_AREA, as polygons in the same way, with the same columns (without buil
 tree crowns. roof_seed = 1 marks a roof-seeded object the rule rejected: it is in footprints
 too. Neighbouring crowns are simplified one by one, so their shared edges can differ a little.
 
-Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns, and Intensity
-for POINT_METRICS (tilestream reads all fields unless --dims says otherwise).
+Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns, and Intensity and
+PointSourceId for POINT_METRICS (tilestream reads all fields unless --dims says otherwise).
 
     python src/tilestream.py run out/ --ept WA_NorthEast_2_B22 --bbox XMIN YMIN XMAX YMAX \\
         --analysis src/buildings.py
@@ -124,7 +125,9 @@ CODES = {"footprints": {"building": {0: "not a building", 1: "building", 2: "she
                                     5: "not straightened: not a building"},
                         "review": {0: "no", 1: "tree notch: a tree may hide part of the roof"}}}
 POINT_METRICS = True    # per-object metrics from the points (heights, cover, intensity; see
-                        # point_metrics). Needs the Intensity field.
+                        # point_metrics, and cover_min). Needs the Intensity and PointSourceId fields.
+COVER_LINE_SHARE = 0.5  # cover_min: a flight line counts if it reaches at least this share of the object's
+                        # pixels (one that grazes the object sees only its edge)
 CROWN_MIN_AREA = 5.0    # m^2: smaller tree objects are mostly loose bits just over MIN_HEIGHT (shrubs,
                         # snags): in Nine Mile Falls 44% of the tree objects, but 1% of their area
 GROUND = 2
@@ -168,8 +171,9 @@ def analyze(pts, w):
     t = out["objects"]
     if POINT_METRICS:
         h = pts["Z"][keep] - dtm.ravel()[pixel[keep]]  # height above the ground
-        t.update(point_metrics(h, pts["ReturnNumber"][keep] == 1, pts["Intensity"][keep],
-                               segments.ravel()[pixel[keep]], labels))
+        label = segments.ravel()[pixel[keep]]
+        t.update(point_metrics(h, first[keep], pts["Intensity"][keep], label, labels))
+        t["cover_min"] = cover_min(h, first[keep], label, pixel[keep], pts["PointSourceId"][keep], labels)
     t["building"] = building_code(t)
     # two polygon layers: footprints = the roof-seeded rows, crowns = the rows that aren't buildings.
     # Most roof-seeded rejects are crowns too, so they are in both until we trust the rule.
@@ -358,6 +362,33 @@ def point_metrics(h, first, intensity, label, rows):
             heights["top"][j], heights["h_mean"][j], heights["h_std"][j] = v[-1], v.mean(), v.std()
             heights["h_p50"][j], heights["h_p95"][j] = np.percentile(v, [50, 95])
     return {"n_points": out.pop("n_points"), **heights, **out}
+
+
+def cover_min(h, first, label, pixel, source, rows):
+    """The vehicle clue: the lowest cover (see point_metrics) of any one flight line over each
+    object ``rows`` (their labels). A vehicle that came or went between two passes is there in
+    one line, and in another its first returns hit the ground (cover ~0). A building is there in
+    every line (Chewelah 2022: at least 0.44 in each line of every footprint). Only lines that
+    reach at least COVER_LINE_SHARE of the object's pixels (those with a first return of any line)
+    count. ``source`` is each point's flight line (PointSourceId), ``pixel`` its pixel; NaN where
+    no line counts. Counts and a minimum: the same in any order of the points."""
+    m = first & (label > 0)
+    lab, pix, up = label[m].astype(np.int64), pixel[m], h[m] > MIN_HEIGHT
+    lines, line = np.unique(source[m], return_inverse=True)
+    key = lab * len(lines) + line  # one key per object and line
+    k = np.arange(key.max(initial=-1) + 1)
+    obj = k // max(len(lines), 1)  # each key's object
+    with np.errstate(invalid="ignore"):  # keys without returns: 0 / 0, and they don't count
+        cover = np.bincount(key, up, len(k)) / np.bincount(key, minlength=len(k))
+    # the pixels each line reaches, and each object's pixels that any line reaches
+    cells = pixel.max(initial=0) + 1
+    size = max(label.max(initial=0), rows.max(initial=0)) + 1
+    reached = np.bincount(np.unique(key * cells + pix) // cells, minlength=len(k))
+    seen = np.bincount(np.unique(lab * cells + pix) // cells, minlength=size)
+    ok = (reached > 0) & (reached >= COVER_LINE_SHARE * seen[obj])
+    low = np.full(size, np.inf)
+    np.minimum.at(low, obj[ok], cover[ok])
+    return np.where(np.isinf(low), np.nan, low)[rows]
 
 
 def building_code(t):
