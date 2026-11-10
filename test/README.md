@@ -156,6 +156,18 @@ Two helpers make the fake lidar:
 - `test_reclaim_roof_roof_like_object`: a whole "tree" object against a roof with few split
   pulses (0.1, below `ROOF_MULTI`) is a roof section where a tree top landed: it goes to the
   roof. A crown against the other side, with many split pulses, stays a tree.
+- `test_reclaim_roof_bigger_roof_like_object`: from `RECLAIM_AREA` (25 m²) up, a whole "tree"
+  object against a roof with fewer than `RECLAIM_MULTI` (0.2) split pulses goes to the roof
+  (a 36 m² one with 0.17, like "edge of building" in Chewelah). A 12 m² one with 0.17 stays
+  a tree (small ones need fewer than `ROOF_MULTI`), and so does a 30 m² one with 0.25. Fails
+  with 0.15 for all, with 0.2 at every size, and with 0.3.
+- `test_reclaim_roof_whole_object_to_longest_border`: a whole roof-like object goes in one piece
+  to the roof it shares the longest border with (`longest_border`), even where a small roof on
+  its far side is nearer to some of its pixels (Chewelah fp66 got a loose piece that way). Between
+  two equal roofs with equal borders, the upper one (first in the image) gets it. Run twice,
+  with the roof labels swapped: positions decide, not label numbers, so every window agrees.
+  Fails with the nearest roof pixel, with ties by label number, with the shortest border, and
+  with no tie rule.
 - `test_reclaim_roof_keeps_objects_whole`: two "trees" flooded along the roof's edges from a
   top beside the roof. The strips go to the roof, which cuts each object in parts. The part
   with the top keeps the label; a cut-off part next to the roof goes to the roof; one that

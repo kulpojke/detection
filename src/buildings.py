@@ -102,6 +102,9 @@ TREE_TOP_RADIUS = 2.5   # m, a tree top is the highest point within this distanc
                         # big crowns into 2-3 pieces
 THIN = 1.0              # m, disk radius: tree pieces narrower than ~2.5 m that touch a roof are roof
                         # (eaves); with 0.5 m, half the eave strips stayed trees
+RECLAIM_MULTI = 0.2     # a whole tree object next to a roof is roof below ROOF_MULTI split pulses, or below
+RECLAIM_AREA = 25       # this if it has at least RECLAIM_AREA m^2. In Chewelah, 0.3 would take in 4 trees of
+                        # 8-14 m; under 25 m^2, 0.15-0.2 includes a 10.7 m high piece of tree
 SIMPLIFY = 0.5          # m: outline corners within this of a straight line are dropped (one pixel)
 SIMPLIFY_MIN_AREA = 25  # m^2: smaller objects keep their exact pixel outline
 HOLE_FILL = 1.0         # m^2: smaller holes in an outline are filled: single low pixels in a roof (in Chewelah
@@ -254,9 +257,12 @@ def segment(g):
 
 
 def reclaim_roof(segments, n_roofs, g):
-    """Give the tree pixels that are really roof to the nearest roof:
-      - whole tree objects next to a roof with, as a whole, few split pulses (below ROOF_MULTI):
-        roof sections and roof edges where a tree top landed, so the flood made them a "tree".
+    """Give the tree pixels that are really roof to a roof:
+      - whole tree objects next to a roof with, as a whole, few split pulses (below ROOF_MULTI,
+        or below RECLAIM_MULTI from RECLAIM_AREA up): roof sections and roof edges where a tree
+        top landed, so the flood made them a "tree". Each goes in one piece to the roof it shares
+        the longest border with (longest_border), not pixel by pixel to the nearest roof: that
+        could hand part of it to a small roof nearby that it doesn't even touch.
       - thin pieces next to a roof. Eaves, ridges and steps between roof sections look like trees
         (split pulses, sharp bends), and a crown can flood along them deep into a roof. An erosion
         followed by a dilation (an opening) with a disk of radius THIN keeps only the tree pixels
@@ -264,8 +270,10 @@ def reclaim_roof(segments, n_roofs, g):
       - tree patches with roof all around them: rooftop units and raised parts of a building are
         too wide for the opening, but a real tree reaches past the roof edge somewhere, down to
         lower ground.
-    Taking the thin pieces can cut a tree object in parts. The part with its top keeps the
-    label; another part goes to the roof if it touches one, or else becomes an object of its own."""
+    The thin pieces and the patches go pixel by pixel to the nearest roof (a strip between two
+    buildings is split between them). Taking the thin pieces can cut a tree object in parts.
+    The part with its top keeps the label; another part goes to the roof if it touches one, or
+    else becomes an object of its own."""
     if n_roofs == 0:
         return segments
     trees = segments > n_roofs
@@ -274,11 +282,14 @@ def reclaim_roof(segments, n_roofs, g):
     _, (r, c) = ndimage.distance_transform_edt(~roof, return_indices=True)
     size = segments.max() + 1
     with np.errstate(invalid="ignore", divide="ignore"):  # no pulses: NaN, not roof-like
-        roof_like = (np.bincount(segments.ravel(), g["split"].ravel(), size)
-                     / np.bincount(segments.ravel(), g["pulses"].ravel(), size)) < ROOF_MULTI
+        share = (np.bincount(segments.ravel(), g["split"].ravel(), size)
+                 / np.bincount(segments.ravel(), g["pulses"].ravel(), size))
+    area = np.bincount(segments.ravel(), minlength=size) * RES ** 2
+    roof_like = (share < ROOF_MULTI) | ((share < RECLAIM_MULTI) & (area >= RECLAIM_AREA))
     touching = np.zeros(size, bool)
     touching[segments[trees & ndimage.binary_dilation(roof)]] = True
-    take = trees & (roof_like & touching)[segments]  # whole roof-like objects next to a roof
+    whole = trees & (roof_like & touching)[segments]  # whole roof-like objects next to a roof
+    take = whole.copy()
     roof |= take
     rest = trees & ~take
     k = round(THIN / RES)
@@ -290,7 +301,9 @@ def reclaim_roof(segments, n_roofs, g):
     patches, _ = ndimage.label(rest)
     reach_ground = np.isin(patches, patches[rest & ndimage.binary_dilation(segments == 0)])
     take |= rest & ~reach_ground  # patches that touch no lower ground: roof all around
+    best = longest_border(segments, n_roofs)[segments[whole]]  # before the labels change
     segments[take] = segments[r[take], c[take]]
+    segments[whole] = best
 
     # each tree object in one piece again: the part with its top (highest pixel) keeps the label
     trees = segments > n_roofs
@@ -305,6 +318,30 @@ def reclaim_roof(segments, n_roofs, g):
     alone = cut & ~to_roof
     segments[alone] = segments.max() + parts[alone]  # new labels, past all the others
     return segments
+
+
+def longest_border(segments, n_roofs):
+    """For each label, the roof (1..n_roofs) it shares the longest border with: the most pairs
+    of side-by-side pixels; 0 if it touches none. On a tie, the roof whose first pixel comes
+    first (top row, then left): positions, unlike label numbers, are the same in every window."""
+    size = segments.max() + 1
+    best = np.zeros(size, segments.dtype)
+    left, right, up, down = segments[:, :-1], segments[:, 1:], segments[:-1], segments[1:]
+    a = np.concatenate([left.ravel(), right.ravel(), up.ravel(), down.ravel()])
+    b = np.concatenate([right.ravel(), left.ravel(), down.ravel(), up.ravel()])  # a's neighbour
+    m = (a > n_roofs) & (b > 0) & (b <= n_roofs)  # an object's pixel beside a roof's
+    if not m.any():
+        return best
+    keys, n = np.unique(a[m].astype(np.int64) * size + b[m], return_counts=True)
+    obj, roof = keys // size, keys % size  # each (object, roof) pair, and n its border
+    labels, first = np.unique(segments, return_index=True)  # each label's first pixel
+    start = np.zeros(size, np.int64)
+    start[labels] = first
+    order = np.lexsort((-start[roof], n, obj))  # by object, then border, then the earliest roof
+    obj, roof = obj[order], roof[order]
+    last = np.append(obj[1:] != obj[:-1], True)  # each object's last row: its longest border
+    best[obj[last]] = roof[last]
+    return best
 
 
 def objects_table(segments, n_roofs, g, x0, ytop):

@@ -467,6 +467,40 @@ def test_reclaim_roof_roof_like_object():
     assert (out[seg == 2] == 1).all() and (out[17:20, 32:36] == 3).all()
 
 
+def test_reclaim_roof_bigger_roof_like_object():
+    """From RECLAIM_AREA up, a "tree" object next to a roof is a roof section below
+    RECLAIM_MULTI split pulses (like "edge of building" in Chewelah, 0.17). A smaller one needs
+    fewer than ROOF_MULTI: a piece of tree can have 0.17 too. A big one with more stays a tree."""
+    seg = np.zeros((40, 50), np.int32)
+    seg[10:30, 15:35] = 1  # the roof
+    seg[10:22, 3:15] = 2  # 6 x 6 m against its left edge, 0.17
+    seg[12:19, 35:42] = 3  # 3.5 x 3.5 m against its right edge, 0.17
+    seg[30:40, 18:30] = 4  # 5 x 6 m against its bottom edge, 0.25
+    split = np.select([seg == 2, seg == 3, seg == 4], [0.17, 0.17, 0.25], 0)
+    out = buildings.reclaim_roof(seg.copy(), 1, tree_like(seg, split))
+    assert (out[seg == 2] == 1).all()
+    assert (out[14:17, 37:40] == 3).all() and (out[32:38, 20:28] == 4).all()  # their middles stay
+
+
+def test_reclaim_roof_whole_object_to_longest_border():
+    """A whole roof-like object goes in one piece to the roof it shares the longest border with,
+    even where another roof is nearer (Chewelah fp66 got a loose piece that way). A: a big roof,
+    the object, and on its far side a small roof with a short border. B: the object between two
+    equal roofs with equal borders: the roof that comes first (the upper one) gets it, whatever
+    the labels say. Run with the roof labels swapped too: positions decide, not label numbers."""
+    def scene(big, small, upper, lower):
+        seg = np.zeros((30, 50), np.int32)
+        seg[5:25, 2:14], seg[5:25, 14:20], seg[8:11, 20:23] = big, 5, small  # A
+        seg[2:12, 30:40], seg[12:18, 30:40], seg[18:28, 30:40] = upper, 6, lower  # B
+        return seg
+    for labels in ((1, 2, 3, 4), (2, 1, 4, 3)):
+        seg = scene(*labels)
+        out = buildings.reclaim_roof(seg.copy(), 4, tree_like(seg, np.where(seg > 4, 0.1, 0)))
+        big, small, upper, lower = labels
+        assert (out[seg == 5] == big).all() and (out[seg == 6] == upper).all()
+        assert np.array_equal(out[seg <= 4], seg[seg <= 4])  # the roofs keep their pixels
+
+
 def test_reclaim_roof_keeps_objects_whole():
     """Two "trees" that flooded along the roof's edges, each from a top beside the roof. The thin
     strips go to the roof, which cuts each object in parts. The part with the top keeps the

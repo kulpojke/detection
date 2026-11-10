@@ -1,7 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE` and the labelled
-seedless candidates and run 22)._
+_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit and
+`longest_border`, runs 22-24)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -14,7 +14,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-09)
-- **Offline suite: 66 passed** (10 network tests skipped), in about 13 s.
+- **Offline suite: 68 passed** (10 network tests skipped), in about 13 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
@@ -140,8 +140,11 @@ under a building the ground is filled in from around it.
 
   Patches without a seed get one at their highest pixel. Afterwards `reclaim_roof()`
   gives "tree" pixels that are really roof to the nearest roof:
-  - whole "tree" objects touching a roof with fewer split pulses than `ROOF_MULTI` (0.15):
-    roof sections and roof edges where a tree top landed;
+  - whole "tree" objects touching a roof with fewer split pulses than `ROOF_MULTI` (0.15),
+    or than `RECLAIM_MULTI` (0.2) from `RECLAIM_AREA` (25 m²) up: roof sections and roof
+    edges where a tree top landed. Each goes in one piece to the roof it shares the longest
+    border with (`longest_border`; on a tie, the roof that comes first in the image, so every
+    window agrees), not pixel by pixel to the nearest roof (added 2026-11-09);
   - thin pieces touching a roof (eaves, ridges), found with an opening using a 1 m disk;
   - tree patches with roof all around (rooftop units).
 
@@ -254,6 +257,24 @@ under a building the ground is filled in from around it.
     pixel, y = 5347503.8) is just past the site's north edge, so no window of this run keeps
     it. A larger run would.
   - Nine Mile: the same footprints; one crown changed a little.
+- **Runs 23 and 24** (2026-11-09, both sites, 250 m windows), the merge limit:
+  - Run 23 (`RECLAIM_MULTI`/`RECLAIM_AREA`, pixels still to the nearest roof): fp68 took in
+    "edge of building" (+103 m²) and fp164 the piece at (447099, 5347393) (+44 m²; Michael:
+    correct, its interior ring probably a pipe between roofs). Side effect: fp66, a 3.5 m²
+    roof-seeded bit next to fp68 (code 0), got a loose 4.8 m² piece of "edge of building"
+    that it doesn't even touch (0 m of shared border; fp68 shares 32 m), because those pixels
+    were nearer to it. It became 8 m² and a "shed" (code 2). Michael: wrong, one part
+    probably a tree crown, the other building edge.
+  - Run 24 (`longest_border`): fp66 is back to 3.5 m² with code 0, and fp68 has the whole
+    piece. fp59 and fp60, which touch, traded 1–2 m². Nothing else changed; Nine Mile
+    unchanged in both runs.
+  - fp89, a 19 m tree with a roof seed (code 0, rejected by the rule), took in a 38 m² piece
+    of tree with 0.16 split pulses: `reclaim_roof` treats every roof-seeded object as a roof,
+    rejected ones too. It stays code 0, so no building changes.
+  - Seam check: the four 250 m windows against two 500 m windows give the same footprints
+    and crowns (all columns), except the big building on the east edge, which the smaller
+    run cuts off where its area ends.
+  - Review files: `tmp_symlinks/changed_footprints_run23.geojson` (column `what`).
 - **Known limits:**
   - Vehicles, containers and dumpsters look like sheds from above (code 2). A vehicle that
     moved between flight lines gets `cover_min` ~0, but it rarely becomes a footprint anyway:
@@ -287,14 +308,15 @@ under a building the ground is filled in from around it.
     518 m, 8 m above the street to its south and east, 2 m below the slope to its north). If
     the ground classification marks a terrace as "not ground", it leaves a covered hole like
     a roof. Lidar alone can't tell it from a building dug into the hillside.
-  - A roof part touching a building with 0.15–0.35 split pulses stays a "crown"; only
-    parts under 0.15 are merged into the roof. Example: "edge of building" (446926,
-    5347442), 0.17, against footprint 64. Measured on run 20's crowns (≥ 25 m², touching a
-    building): a limit of 0.2 would merge 2 in Chewelah (that one and an unknown 35 m², 3.7 m
-    high piece at (447099, 5347393)); 0.3 would merge 9, of which 4 are clearly trees (8–14 m
-    high, up to 327 m²). Nine Mile: none either way, because its crowns have 0.5+. Chewelah's
-    trees split much less (25% of its crowns ≥ 25 m² are under 0.32), so the risk depends on
-    the forest.
+  - A roof part touching a building with 0.2–0.35 split pulses (0.15–0.35 under 25 m²)
+    stays a "crown". Why not looser (measured on run 20's crowns touching a building): 0.3
+    from 25 m² up would merge 9 in Chewelah, of which 4 are clearly trees (8–14 m high, up to
+    327 m²); 0.2 at every size would also take a 7.8 m², 10.7 m high piece of tree. Nine
+    Mile: none either way, because its crowns have 0.5+. Chewelah's trees split much less
+    (25% of its crowns ≥ 25 m² are under 0.32), so the risk depends on the forest. Height
+    would be a better clue (a tree piece stands well above the roof), not used yet.
+  - A rejected roof-seeded tree (code 0) can take in neighbouring pieces of tree in
+    `reclaim_roof` (fp89 in run 23). Harmless for buildings.
   - A pile of logs is a footprint (Chewelah 142, ~(447110, 5347018), 158 m²): it looks like a
     roof on every feature. Left alone for now.
   - A few footprints have a one-pixel part that touches the roof only at a corner.
@@ -373,7 +395,7 @@ until that file changes) and runs the network tests only
 (`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
 that is still going. The offline tests don't run in CI yet. The first run (2026-11-05) passed.
 
-- **`test/test_tilestream.py`** (offline, 66 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 68 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -444,14 +466,10 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
 
 ## Next steps
-1. **The merge limit in `reclaim_roof`** (agreed with Michael 2026-11-09): whole "tree"
-   objects touching a roof are merged below 0.2 split pulses instead of 0.15 (not 0.3: see
-   Known limits). Test it, run both sites again, compare with run 22, and check every
-   changed footprint.
-2. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
+1. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
    recovery set) on a 300 m box, and check `GpsTime` of the pre-fire tiles used (B4's and
    B2's official windows run past 2018-11-08).
-3. Later for buildings:
+2. Later for buildings:
    - **NAIP as a review column** (agreed with Michael 2026-11-09), e.g. `green_share`: the
      share of pixels with NDVI above ~0.25 inside the footprint shrunk by 1–2 m, from the
      NAIP nearest in time. Only from ~25 m², as a flag (like `review`), not a verdict, and
@@ -480,7 +498,7 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
    - the `reclaim_roof` thin-neck case.
    - Point metrics are on by a constant (`POINT_METRICS`). In a final command-line version
      they might become an option; tilestream has no way yet to pass options to an analysis.
-5. Decide the permanent fix for the `~/.local` packages (see Environment).
-6. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
+3. Decide the permanent fix for the `~/.local` packages (see Environment).
+4. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
    then go larger (`--list` or `--all`, in chunks or overnight). Measure memory first for
    larger windows.
