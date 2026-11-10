@@ -5,8 +5,8 @@ are given with their values. The numbers in brackets come from the two test site
 WA_NorthEast_2_B22, at 12–15 pulses/m²: Chewelah (a town) and Nine Mile Falls (forest with
 houses). `HANDOFF.md` has the history and `test/README.md` lists what each test checks.
 
-State on 2026-11-09: sections 1–6 are in the code; section 7 (walls from the points) has been
-measured but not built.
+State on 2026-11-10: sections 1–6 are in the code; for section 7 (walls from the points), the
+measurement (`wall_edge`) is in the code but doesn't move any walls yet.
 
 ---
 
@@ -298,20 +298,28 @@ lies outside the true roof edge. Section 7 measures how far.
 
 ---
 
-## 7. Walls from the points (measured, not yet built)
+## 7. Walls from the points (`wall_edge`: measured, not used yet)
 
 A wall placed on pixel edges is good to about ±0.25 m. The points can do better.
 
 **The estimate.** Cut the wall into slices of width s = 0.5 m along its length. In each slice,
-take the roof point furthest out, d_max. Suppose the roof points form a random (Poisson) pattern
-with ρ points per m². Then the chance of no point within a distance x of the edge, in one
-slice, is $e^{-\rho s x}$. So the gap between the outermost point and the edge is exponential,
-with mean $1/(\rho s)$ and median $\ln 2/(\rho s)$, about 0.10 m at ρ = 14. The edge is then
+take the roof point furthest out, d_max. It always lies a little inside the true edge: the roof
+stops at the edge, and between its last point and the edge there is a gap. Suppose the roof
+points form a random (Poisson) pattern with ρ points per m². A strip of the slice x deep along
+the edge then holds ρsx points on average, and the chance that it holds none (that the gap is
+bigger than x) is $e^{-\rho s x}$. So the gap is exponential, with mean $1/(\rho s)$ and median
+$\ln 2/(\rho s)$ (where $e^{-\rho s x} = \tfrac12$): about 0.10 m at ρ = 14. The edge is then
 
 $$\hat e = \operatorname{median}_k\, d_{\max,k} + \frac{\ln 2}{\rho s}.$$
 
-The median ignores the odd slice with a gutter, an antenna or a gap. Over the ~20 slices of a
-10 m wall the error is about ±3 cm.
+The median ignores the odd slice with a gutter, an antenna or a gap. Because it is the median of
+the outermost points, the gap to add is the median gap too: the mean would put the wall about
+4 cm too far out. Over the ~20 slices of a 10 m wall the error is about ±3 cm.
+
+The gap grows as the density falls: 0.28 m at 5 points per m², 0.69 m at QL2's 2 per m², as big
+as the bias being corrected, and as uncertain. Real points lie along scan lines, more regularly
+than at random; for a regular grid at 14 per m² the median gap is about 0.08 m, so the term is
+good to about 2 cm.
 
 **Roof side only.** Two effects make the ground side unreliable:
 
