@@ -541,6 +541,9 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 - `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
 - `theoretical_basis.md`: how each step works and why (with mermaid diagrams); keep it in step with the code.
+  A web page made from it (one self-contained HTML file, kept by hand in step with the .md) is
+  published privately on claude.ai: https://claude.ai/artifact/A479foxZU67XFnEWae5gKx (last
+  updated 2026-11-10, run 28). Michael would like it on GitHub Pages later.
 
 ## Next steps
 1. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
@@ -592,8 +595,8 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      Two GDAL warnings in the logs: "Self-intersection" is GEOS reporting a moved shape
      that `refine_walls` then rejects (outside the site there); "OGR_G_Area() called against
      non-surface geometry" came from a strip touching a neighbour at a corner (a point), and
-     `move_wall` now measures only area intersections. Still to do: 4. HANDOFF and
-     theoretical_basis.md §7. On the synthetic 0.25 m lattice (`scene_points`), the walls
+     `move_wall` now measures only area intersections. Step 4: theoretical_basis.md §7
+     describes moving the walls (2026-11-10), and the web page is updated. On the synthetic 0.25 m lattice (`scene_points`), the walls
      move 4 cm in although the pixel outline is exact: the ln 2 / (ρs) term assumes random
      points; on a regular pattern it is off by 2–4 cm either way.
      Michael still wanted to look at fp114, fp94, fp111 and fp40 in the GeoPackage.
@@ -611,6 +614,9 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
    - Point metrics are on by a constant (`POINT_METRICS`). In a final command-line version
      they might become an option; tilestream has no way yet to pass options to an analysis.
 3. Decide the permanent fix for the `~/.local` packages (see Environment).
+   Also later: put the theoretical_basis web page on GitHub Pages (e.g. `docs/index.html`;
+   the HTML is one file with no outside parts, so the repo's copy must stay in step with
+   the .md).
 4. Scale up: a modest real run with buildings.py (a few km²). Check the merged outputs,
    then go larger (`--list` or `--all`, in chunks or overnight). Measure memory first for
    larger windows.

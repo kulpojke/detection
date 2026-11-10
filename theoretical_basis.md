@@ -5,8 +5,8 @@ are given with their values. The numbers in brackets come from the two test site
 WA_NorthEast_2_B22, at 12–15 pulses/m²: Chewelah (a town) and Nine Mile Falls (forest with
 houses). `HANDOFF.md` has the history and `test/README.md` lists what each test checks.
 
-State on 2026-11-10: sections 1–6 are in the code; for section 7 (walls from the points), the
-measurement (`wall_edge`) is in the code but doesn't move any walls yet.
+State on 2026-11-10: everything described here is in the code. Since run 28 the walls of
+straightened buildings move to where the points put them (section 7).
 
 ---
 
@@ -294,11 +294,11 @@ Buildings get straight walls:
 usually a tree over the roof's corner, not a wall. Such buildings get `review` = 1.
 
 **A known bias.** A pixel counts as roof if any of its pulses hits the roof, so the pixel outline
-lies outside the true roof edge. Section 7 measures how far.
+lies outside the true roof edge. Section 7 measures how far and moves the walls back.
 
 ---
 
-## 7. Walls from the points (`wall_edge`: measured, not used yet)
+## 7. Walls from the points (`wall_edge`, `move_wall`, `refine_walls`)
 
 A wall placed on pixel edges is good to about ±0.25 m. The points can do better.
 
@@ -333,25 +333,52 @@ land 4 cm too far in.)
 wall. Each slice gets its own height and the slices share one slope across the wall. A single
 plane fails at gable ends, where the roof rises along the wall to the ridge.
 
-**Result** (Chewelah, 559 straight walls): the walls move in by a median 0.15 m (middle half
-0.10–0.20 m). That is the pixel bias, about 6% of the area of a 10 × 10 m house.
+**Moving the walls.** Each wall of a straightened building lies on a line
+$\mathbf n_i \cdot \mathbf x = c_i$, where $\mathbf n_i$ is its outward normal (for a courtyard,
+outward is into the courtyard). Moving the wall by its shift $s_i$ (negative is inward) only
+changes $c_i$ to $c_i + s_i$. Each corner is where its two moved lines cross:
+
+$$\begin{pmatrix} \mathbf n_{i-1}^\top \\ \mathbf n_i^\top \end{pmatrix} \mathbf x
+= \begin{pmatrix} c_{i-1} + s_{i-1} \\ c_i + s_i \end{pmatrix}.$$
+
+So the walls keep their directions and the building stays square. A wall that keeps its place
+has s = 0. If two neighbouring walls are parallel, the corner between them becomes a short step.
+If the result isn't a valid shape (a narrow part pinched shut), the building keeps its
+straightened walls.
 
 **Safety rules.** A wall keeps its place:
 
-- if it isn't straight;
-- if a tree or high points stand in front of it;
-- if the surface fits poorly or too few slices have roof points;
-- if it would move more than 0.5 m;
-- or if moving it out would push it into a neighbour. That last rule is Michael's: neighbours
-  at the same height pushed five walls out by ~1 m.
+- if it isn't square to the building's main direction (within 1°): diagonal walls are often a
+  tree's edge;
+- if `wall_edge` can't measure it: too few slices with roof points, a poor fit, or high points
+  in front of it;
+- if tree pixels lie in front of it (more than 20% of the places 0.75 and 1.25 m out);
+- if it would move more than 0.5 m (7 of 858 walls in Chewelah, mostly next to a building of
+  the same height);
+- or if moving it out would push it into another roof-seeded object. That last rule is
+  Michael's. The neighbours are taken as their pixel outlines, which are the same in every
+  window. Their final footprints would depend on which building is done first, and that order
+  changes from window to window.
+
+**Result.** Measured on its own (Chewelah run 24, 559 straight walls), the walls move in by a
+median 0.15 m (middle half 0.10–0.20 m). That is the pixel bias, about 6% of the area of a
+10 × 10 m house. Built in (run 28), in Chewelah 115 of the 117 straightened buildings had walls
+moved, 592 walls in all. The median shift per building is 0.16 m inward (90% between 0.09 and
+0.24 m), and almost all of it is inward: 1128 m² of outline moved in, 17 m² out. The footprints
+lost a median 3% of their area. That is less than 6% because most buildings are bigger than
+10 × 10 m and not every wall moves. In Nine Mile Falls 3 buildings moved by 0.12 m. A test house
+at random points shows the same: its pixel outline is over 124 m² for a true 120 m², and the
+moved walls give 120 ± 2 m². The footprints' `area` column stays the pixel count. The columns
+`walls_moved` (how many) and `wall_shift` (their median shift) record what moved.
 
 ---
 
 ## 8. How we know it works
 
-- **Seam tests:** different window layouts give identical outputs (section 1).
+- **Seam tests:** different window layouts give identical outputs (section 1), the moved walls
+  included.
 - **Synthetic scenes with known answers:** a house, a tree, a rock, a bush; a tree over a
-  house's corner; a sloping roof under a crown.
+  house's corner; a sloping roof under a crown; a house measured at random points.
 - **Every rule has a test that fails without it.** This is checked by running the tests against
   deliberately broken copies of the code.
 - **Real objects labelled in QGIS** by Michael: the rock, the sheds, the vehicles, a hedge, a
