@@ -48,7 +48,7 @@ point keeps the row. Columns:
   or RV, a building under SMALL_STRUCTURE), and with POINT_METRICS the metrics from the
   object's points: n_points, top, h_mean, h_std, h_p50, h_p95, cover, i_mean, i_std (see
   point_metrics), and cover_min (the lowest cover of one flight line: about 0 for a vehicle
-  that came or went between two passes; see cover_min)
+  that came or went between two passes; see cover_min; the rule's vehicle guard)
 
 Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the same columns
 (without roof_seed) and two more:
@@ -123,6 +123,8 @@ BUILDING_ROUGH = 0.5    # a median roughness_inside below this (m; as ROOF_ROUGH
 BUILDING_SMALL = 25     # m^2: smaller objects need a roughness_inside below BUILDING_ROUGH_SMALL:
 BUILDING_ROUGH_SMALL = 0.3  # a shed's simple roof is smoother (0.05-0.15) than a bush (0.36-0.38),
 BUILDING_AREA = 4.0     # and an area of at least this (m^2; a 2 x 3 m shed is 6 m^2)
+VEHICLE_COVER = 0.2     # and no cover_min below this: one flight line saw the ground there, so it came or went
+                        # between passes (Chewelah: 0.00 for 5 vehicles that moved, >= 0.29 for every other object)
 SMALL_STRUCTURE = 40    # m^2: a smaller building is a shed, container or RV (40 ft container 30 m^2, big RV 35)
 CODES = {"footprints": {"building": {0: "not a building", 1: "building", 2: "shed, container or RV"},
                         "outline": {0: "straightened", 1: "not straightened: too small",
@@ -370,10 +372,15 @@ def is_building(t):
     a shed has a simple roof, while big buildings have ridges, vents and units.
     (Judging objects without a roof seed too was tried on 2026-11-03: in Chewelah it turned
     many trees into buildings.)
-    NaN (no pulses, no inside) fails the test."""
+    NaN (no pulses, no inside) fails the test.
+    The vehicle guard: an object below VEHICLE_COVER in cover_min wasn't there in one flight line.
+    It is insurance: a vehicle that moved leaves no covered hole (another line saw the ground under
+    it), so in Chewelah none got a roof seed. Without cover_min (no POINT_METRICS) or with NaN (no
+    line counts) there is no evidence, and the object passes."""
     rough_max = np.where(t["area"] < BUILDING_SMALL, BUILDING_ROUGH_SMALL, BUILDING_ROUGH)
+    moved = np.asarray(t.get("cover_min", np.nan)) < VEHICLE_COVER  # NaN < x is False: passes
     return ((t["roof_seed"] == 1) & (t["multi_return"] < BUILDING_MULTI)
-            & (t["roughness_inside"] < rough_max) & (t["area"] >= BUILDING_AREA))
+            & (t["roughness_inside"] < rough_max) & (t["area"] >= BUILDING_AREA) & ~moved)
 
 
 def point_metrics(h, first, intensity, label, rows):

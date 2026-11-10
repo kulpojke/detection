@@ -1,7 +1,7 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit and
-`longest_border`, runs 22-24)._
+_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
+`longest_border` (runs 22-24) and the vehicle guard)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -212,7 +212,9 @@ under a building the ground is filled in from around it.
   - split pulses < 0.35;
   - `roughness_inside` < 0.5 (< 0.3 for objects under 25 m²: sheds have simple roofs,
     bushes don't);
-  - area ≥ 4 m².
+  - area ≥ 4 m²;
+  - `cover_min` not below 0.2 (`VEHICLE_COVER`, the vehicle guard, added 2026-11-09). NaN,
+    or no `cover_min` column, passes: it means no evidence.
 - **`building` codes:** 0 = not a building, 1 = building, 2 = shed, container or RV (a
   building under 40 m²).
 - **Test sites** (EPSG:6340, 500 m):
@@ -280,7 +282,15 @@ under a building the ground is filled in from around it.
     moved between flight lines gets `cover_min` ~0, but it rarely becomes a footprint anyway:
     the other lines saw the ground under it, so it leaves no covered hole and gets no roof
     seed. A vehicle parked through all passes looks like a shed, `cover_min` included.
-    `cover_min` isn't used by the rule yet.
+    The rule's vehicle guard (`cover_min` < 0.2 is no building) is insurance: in Chewelah
+    and Nine Mile no roof-seeded object is below 0.33, so it changes nothing there. It is
+    meant for vehicles that still get a seed, e.g. where the other line's road points
+    weren't classified as ground (post-fire Paradise will have many trucks and machines).
+  - **Small buildings without a roof seed are still missed** (e.g. the 6.5 m² shed at
+    446757, 5347286: `hole_share` 0.08). `cover_min` alone can't bring them in: of the 15
+    small seedless candidates (≤ 21 m²) it removes the 5 moving vehicles (0.00), but the
+    shed (0.54) is still 1 among 10: a parked car (0.50), a utility box (0.49), bushes
+    (0.34–0.69), the log pile (0.34) and unknown things (0.29, 0.38).
   - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
     thinner than ~2.5 m. Example: the house at (446776, 5347492).
   - Thin things sticking out of a wall can become little roof spikes.
@@ -480,8 +490,6 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      colours differ between years (2023 is much brighter than 2021). Test it first on the
      labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
      alone doesn't separate the hedge (fp120, a building, is brighter).
-   - Use `cover_min` in the rule (e.g. to keep vehicles out of a seedless rule, or out of
-     code 2). It can't see vehicles that were parked through all passes.
    - **Refine the walls with the points.** Move each straightened wall to the boundary
      between the outermost roof points and the first ground points in front of it. A 10 m
      wall has ~70 edge pulses at 15/m², so it can be placed to a few cm instead of ±0.25 m.

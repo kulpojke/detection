@@ -371,6 +371,11 @@ def test_is_building():
     assert buildings.is_building({k: v[1] for k, v in t.items()})  # one row works too
     # the building column: the shed is a small structure, the houses are buildings
     assert buildings.building_code(t).tolist() == [1, 2, 0, 0, 0, 1, 0, 0, 0]
+    # the vehicle guard: a box like the shed that one flight line saw through (cover_min 0) came
+    # or went between passes; the real shed has 0.63, and NaN (no line counts) is no evidence
+    box = {k: v[[1, 1, 1]] for k, v in t.items()}
+    box["cover_min"] = np.array([0.0, 0.63, np.nan])
+    assert buildings.is_building(box).tolist() == [False, True, True]
 
 
 def test_point_metrics():

@@ -145,7 +145,10 @@ Two helpers make the fake lidar:
   smoother than `BUILDING_ROUGH_SMALL`, while a 180 m² house just as rough (0.40) passes.
   A tree-seeded object, one under `BUILDING_AREA`, and one without pulses (NaN) all fail.
   It works on a whole table and on one row. `building_code` turns this into the `building`
-  column: the shed (under `SMALL_STRUCTURE`) gets 2, the houses 1, the rest 0.
+  column: the shed (under `SMALL_STRUCTURE`) gets 2, the houses 1, the rest 0. The vehicle
+  guard: the same shed with `cover_min` 0 (one flight line saw the ground there) fails, with
+  0.63 (its real value) or NaN it passes, and without a `cover_min` column (the table above)
+  too. Fails when the guard is gone, when NaN fails, and when a missing column counts as 0.
 - `test_describe_roughness_inside`: on a 3 x 4 m flat shed half the pixels are edge pixels,
   so its median `roughness` is high (> 1), but `roughness_inside` is 0. A dome-shaped rock
   stays rough inside (a paraboloid: Laplacian 0.625 everywhere).
