@@ -196,6 +196,15 @@ Two helpers make the fake lidar:
 - `test_tree_notch`: a tree over a roof's corner leaves a diagonal wall with tree in front of
   it, a tree notch of about 5.7 m. The same diagonal with ground in front is a real wall (0),
   and so is a straight wall with a tree beside it.
+- `test_wall_edge`: `wall_edge` on random first returns (`wall_scene`, 14 per m², a fixed seed
+  per roof) around a 10 m wall drawn 0.2 m outside the roof's true edge, as a pixel outline
+  would be. Over 20 roofs the mean shift is within 3 cm of the truth (one wall scatters about
+  ±3.5 cm) on a flat roof, one sloping down to its edge, a gable end (a ridge along the wall:
+  one plane doesn't fit it) and with the wall inside the roof (it moves out). Shuffled points
+  give exactly the same shift. A roof without points along 3 m of the wall ("few points"), a
+  rough roof (0.15 m noise: "poor fit") and a tree in front ("high points in front") aren't
+  measured. Without the ln 2 / (ρs) term, the per-slice heights, the slope across, the
+  height test or any of the three checks, it fails.
 - `test_roof_under_canopy`: `roof_under_canopy` on a hand-built scene (`canopy_scene`): a
   10 x 10 m roof sloping east and north (so a wrong sign in either direction shows) and a
   crown over its east edge, 2 m over the roof and 4 m beyond it, four pulses per pixel. Where

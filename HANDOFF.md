@@ -1,8 +1,8 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
-_Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
-`longest_border` (runs 22-24), the vehicle guard, the walls measurement (step 1) and the roof
-under the canopy (runs 25-27); not yet checked by Michael)._
+_Last updated 2026-11-10 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
+`longest_border` (runs 22-24), the vehicle guard, the walls measurement (step 1), the roof
+under the canopy (runs 25-27; not yet checked by Michael) and `wall_edge` (walls step 2))._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -15,7 +15,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-09)
-- **Offline suite: 70 passed** (10 network tests skipped), in about 13 s.
+- **Offline suite: 71 passed** (10 network tests skipped), in about 13 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
@@ -557,12 +557,19 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
      alone doesn't separate the hedge (fp120, a building, is brighter).
    - **Refine the walls with the points.** Step 1 (measuring) is done, see "Measured on
-     2026-11-09": walls move in 0.15 m on average, ±3 cm each. Still to do, agreed with
-     Michael: 2. `wall_edge()` in buildings.py with a synthetic test (a known edge, e.g. at
-     x = 10.13 m); 3. use it in `straighten()` with the safety rules (straight walls only;
-     no tree, high points or neighbour in front; the fit and slice rules; at most 0.5 m; no
-     moving out into another roof-seeded object's pixels), then runs and a seam check;
-     4. HANDOFF. Michael still wanted to look at fp114, fp94, fp111 and fp40 in the GeoPackage.
+     2026-11-09": walls move in 0.15 m on average, ±3 cm each. Step 2 is done (2026-11-10):
+     `wall_edge()` in buildings.py, not used yet, with `test_wall_edge`. It holds the checks
+     that need only the points ("few points", "poor fit", "high points in front"). On the 858
+     walls of run 24 it agrees with step 1: on the 559 eligible walls a median −0.003 m
+     different (90% within 2 cm; up to 0.10 m on short walls with ~5 points/m², where the
+     ln 2 / (ρs) term is large), and every step-1 reason maps onto its own. (Script
+     `wall_edge_vs_step1.py` in the scratchpad.) Still to do, agreed with Michael:
+     3. use it in `straighten()` with the checks that need the polygon or the rasters
+     (square walls only; no tree pixels in front; at most 0.5 m; no moving out into another
+     roof-seeded object's pixels; the area check), then runs and a seam check; 4. HANDOFF.
+     Michael still wanted to look at fp114, fp94, fp111 and fp40 in the GeoPackage.
+     At QL2 densities (2/m², Paradise pre-fire) `wall_edge` mostly says "few points", and the
+     walls it does measure scatter ±0.15 m (synthetic): it would need a density limit there.
      Since run 27, walls next to roof found under trees have no roof first returns there:
      they are "tree in front" and keep their place.
    - **Roof under the canopy: Michael to check run 27** (`tmp_symlinks/under_canopy_run27.geojson`).

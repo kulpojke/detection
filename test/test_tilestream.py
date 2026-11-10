@@ -639,6 +639,47 @@ def test_tree_notch():
         assert length == (pytest.approx(5.7, abs=0.5) if notch else 0)
 
 
+WALL = np.array([0.0, 0.0]), np.array([10.0, 0.0]), np.array([0.0, 1.0])  # a 10 m wall, the building at y < 0
+
+
+def wall_scene(seed, edge=-0.2, slope=0.0, ridge=0.0, noise=0.03, tree=False, gap=False):
+    """First returns around the wall WALL, at random, 14 per m^2: on a 5 m high roof up to its true
+    edge at y = edge (the wall is where the pixel outline put it), on the ground (0 m) beyond. The
+    roof slopes down to its edge by ``slope`` (m per m), and rises along the wall to a ridge at its
+    middle by ``ridge`` per m (a gable end). ``tree``: from 0.3 m outside the wall, half the points
+    are leaves at 3-8 m. ``gap``: no roof points along 3 m of the wall. Returns (x, y, z, height)."""
+    rng = np.random.default_rng(seed)
+    n = rng.poisson(14 * 12 * 5)
+    x, y = rng.uniform(-1, 11, n), rng.uniform(-3, 2, n)
+    roof = y <= edge
+    z = np.where(roof, 5 + slope * (edge - y) + ridge * (5 - np.abs(x - 5)), 0.0) + rng.normal(0, noise, n)
+    if tree:
+        leaf = (y > 0.3) & (x > 1) & (x < 9) & (rng.random(n) < 0.5)
+        z[leaf] = rng.uniform(3, 8, leaf.sum())
+    keep = ~(roof & (x > 3) & (x < 6)) if gap else np.ones(n, bool)
+    return x[keep], y[keep], z[keep], z[keep]  # the ground at 0: height = z
+
+
+def test_wall_edge():
+    """A pixel outline lies a little outside the roof. wall_edge finds the roof's true edge from its
+    own first returns: over 20 random roofs within 3 cm on average (one wall: about +-3.5 cm), on a
+    flat roof, one sloping down to its edge, a gable end (rising to a ridge along the wall: one plane
+    doesn't fit that) and with the outline inside the roof (the wall moves out). The order of the
+    points doesn't change the result at all. A wall without roof points along part of it, a rough
+    roof (no good fit) and one with a tree in front aren't measured."""
+    p0, p1, out = WALL
+    for kw in ({}, dict(slope=0.5), dict(ridge=0.5), dict(edge=0.2)):
+        shift = [buildings.wall_edge(p0, p1, out, wall_scene(s, **kw))[0] for s in range(20)]
+        assert np.mean(shift) == pytest.approx(kw.get("edge", -0.2), abs=0.03)
+    pts = wall_scene(0)
+    order = np.random.default_rng(1).permutation(len(pts[0]))
+    assert buildings.wall_edge(p0, p1, out, tuple(v[order] for v in pts)) == buildings.wall_edge(p0, p1, out, pts)
+    for kw, why in ((dict(gap=True), "few points"), (dict(noise=0.15), "poor fit"),
+                    (dict(tree=True), "high points in front")):
+        shift, reason = buildings.wall_edge(p0, p1, out, wall_scene(0, **kw))
+        assert np.isnan(shift) and reason == why
+
+
 def canopy_scene(through=(0, 2), over_roof=0.0):
     """A 10 x 10 m roof (object 1) sloping up to the east and north, 5 m + 0.4 and 0.2 m per m (so a
     wrong sign in either direction shows), and a crown (object 2,

@@ -124,6 +124,16 @@ MAX_SHIFT = 1.5         # m: a diagonal wall that would meet its neighbour furth
 STRAIGHT_MIN_AREA = 25  # m^2: a smaller ring (building, part or hole) keeps its pixel outline: walls too short
 STRAIGHT_AGREE = 0.7    # the walls must agree at least this well on one direction (tree-bitten outlines don't)
 STRAIGHT_MAX_CHANGE = 0.1  # the straightened area may differ at most this share from the pixel area
+EDGE_SLICE = 0.5        # m (wall_edge, where the roof's own points put a wall): slices this wide along the wall,
+EDGE_END = 0.5          # leaving out this much at each end (the corners)
+EDGE_FIT = (0.25, 1.5)  # m inside the wall: the roof next to it is fitted to the high first returns there,
+EDGE_TOL = 0.3          # and a high first return within this of that fit is on the roof (the fit drops the others)
+EDGE_FIT_SD = 0.1       # m: the fit must be at least this good,
+EDGE_HAVE = 0.8         # and at least this share of the slices must have a roof point, at least EDGE_SLICES of them
+EDGE_SLICES = 4         # (so walls of at least 3 m)
+EDGE_OUT = 1.0          # m outside the wall: points up to here are looked at. In the outer half of that strip,
+EDGE_FRONT = 0.2        # past the roof, at most this share may be high points off the roof (a tree in front).
+                        # Chewelah: the walls move in a median 0.15 m (middle half 0.10-0.20), the pixel bias
 BUILDING_MULTI = 0.35   # the rule (is_building): over the whole object, a share of split pulses below this,
 BUILDING_ROUGH = 0.5    # a median roughness_inside below this (m; as ROOF_ROUGH: a rock is a dome),
 BUILDING_SMALL = 25     # m^2: smaller objects need a roughness_inside below BUILDING_ROUGH_SMALL:
@@ -775,6 +785,55 @@ def normal(angle):
 
 def parallel(a1, a2):
     return abs((a1 - a2 + 90) % 180 - 90) < 1e-6
+
+
+def wall_edge(p0, p1, out, pts):
+    """Where the roof's own first returns put the straight wall from p0 to p1: (shift, why), the shift
+    in m along ``out`` (the unit normal pointing out of the building; negative: the wall moves in), or
+    NaN and why it can't be measured. A pixel outline lies a little outside the roof: a pixel is roof
+    if any of its pulses hits the roof. ``pts`` holds first returns near the wall (noise dropped):
+    (x, y, z, height above ground).
+    The wall is cut into slices of EDGE_SLICE. The roof next to it is fitted to the high points
+    EDGE_FIT inside it, each slice its own height and one slope across (a gable end rises to the
+    ridge along the wall), in four rounds that each drop the points more than EDGE_TOL off. In each
+    slice the roof point furthest out falls short of the edge by a gap that, for points at random
+    with rho per m^2, is exponential with median ln 2 / (rho EDGE_SLICE). So the edge is the median
+    of those points over the slices (which ignores the odd gutter, antenna or gap) plus that."""
+    x, y, z, h = (np.asarray(v, float) for v in pts)
+    length = np.hypot(*(p1 - p0))
+    along = (p1 - p0) / length
+    a = (x - p0[0]) * along[0] + (y - p0[1]) * along[1]
+    d = (x - p0[0]) * out[0] + (y - p0[1]) * out[1]
+    n = int((length - 2 * EDGE_END) // EDGE_SLICE)
+    k = np.floor((a - EDGE_END) / EDGE_SLICE).astype(int)
+    near = (k >= 0) & (k < n) & (d >= -EDGE_FIT[1]) & (d <= EDGE_OUT)
+    k, d, z, high = k[near], d[near], z[near], h[near] > MIN_HEIGHT
+    inner = high & (d <= -EDGE_FIT[0])
+    if n < EDGE_SLICES or inner.sum() < 10:
+        return np.nan, "few points"
+    fit = np.c_[(k[:, None] == np.arange(n)).astype(float), d]  # a height per slice, one slope across
+    inl = inner
+    for _ in range(4):
+        coef = np.linalg.lstsq(fit[inl], z[inl], rcond=None)[0]
+        off = z - fit @ coef
+        inl = inner & (np.abs(off) <= EDGE_TOL)
+        if inl.sum() < 10:
+            return np.nan, "few points"
+    # the fit's float sums depend on the order of the points (which differs between windows), but it
+    # only decides which points are on the roof; the shift is made of their own distances and a count
+    roof = high & (np.abs(off) <= EDGE_TOL)
+    outer = np.full(n, -np.inf)
+    np.maximum.at(outer, k[roof], d[roof])  # each slice's roof point furthest out
+    have = np.isfinite(outer)
+    if have.mean() < EDGE_HAVE:
+        return np.nan, "few points"
+    if np.std(off[inl]) > EDGE_FIT_SD:
+        return np.nan, "poor fit"
+    front = d > EDGE_OUT / 2
+    if front.any() and np.mean(high[front] & ~roof[front]) > EDGE_FRONT:
+        return np.nan, "high points in front"
+    rho = np.sum(roof & inner) / (n * EDGE_SLICE * (EDGE_FIT[1] - EDGE_FIT[0]))
+    return float(np.median(outer[have]) + np.log(2) / (rho * EDGE_SLICE)), ""
 
 
 def tree_notch(geom, label, segments, n_roofs, x0, ytop):
