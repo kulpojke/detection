@@ -1,7 +1,8 @@
 # Handoff: tilestream, windowed lidar processing from any EPT
 
 _Last updated 2026-11-09 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
-`longest_border` (runs 22-24) and the vehicle guard)._
+`longest_border` (runs 22-24), the vehicle guard, the walls measurement (step 1) and the roof
+under the canopy (runs 25-27); not yet checked by Michael)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -14,7 +15,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-09)
-- **Offline suite: 68 passed** (10 network tests skipped), in about 13 s.
+- **Offline suite: 70 passed** (10 network tests skipped), in about 13 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
@@ -30,6 +31,7 @@ building logic goes into it.
   code, crown polygons, and metrics per object from the points (heights, cover,
   intensity, and `cover_min`, the vehicle clue). Buildings get straight walls (4d), with an
   `outline` code that says how each polygon was made, and a `review` flag for tree notches.
+  Since 2026-11-09 footprints also get the roof under overhanging trees (`under_canopy`).
   See "Building detection".
 - Repository: https://github.com/kulpojke/detection.
 - Earlier (2026-10-30), for reference:
@@ -130,7 +132,7 @@ under a building the ground is filled in from around it.
     straight edges;
   - `multi_return`: the share of split pulses;
   - `roughness`: |Laplacian| of the dsm;
-  - `segments`: 1 roof, 2 tree.
+  - `segments`: 1 roof, 2 tree, 3 a building's roof found under a tree.
 - **`segment()`:** a watershed on the ndsm, from two kinds of seeds:
   - **roof seeds:** the roof-like pieces of covered holes. A shed without such a piece
     is seeded with its whole hole. A hole that fails the roof test as a whole (because it
@@ -175,7 +177,7 @@ under a building the ground is filled in from around it.
     order, which can differ per window;
   - `building` (see below).
 - **`footprints`** (GeoPackage): every roof-seeded object as a polygon, with the same
-  columns plus `outline` and `review` (below). Rejects stay in the layer, so you can see them
+  columns plus `outline`, `review` and `under_canopy` (below). Rejects stay in the layer, so you can see them
   in QGIS. Outlines come from `gdal.Polygonize` (`trace()`), with holes under 1 m² filled
   (`HOLE_FILL`; in Chewelah 109 of 120 holes, single low pixels in a roof). Buildings
   (codes 1 and 2) get straight walls; everything else, and buildings the safety net turns
@@ -203,6 +205,25 @@ under a building the ground is filled in from around it.
   pixels just in front of it: a tree hangs over the roof and hides part of it. In front of a
   real wall is ground or another building. Checked against the DSM by Michael: it does "a
   reasonable job of telling us that we should review a building".
+- **Roof under the canopy, `roof_under_canopy()`** (added 2026-11-09), after the rule, for
+  buildings only. Where a tree hangs over a roof, part of its pulses get through, and their last
+  returns lie on the roof's surface continued under the tree; beyond the roof's edge they reach
+  the ground. A pixel of another object within 2 m (`CANOPY_REACH`) of a building is roof if:
+  - its top isn't under the continued surface (a lower tree beside the wall isn't over it);
+  - and one of its last returns lies within 0.15 m (`CANOPY_ON`) of the surface, and none more
+    than 0.3 m (`CANOPY_TOL`) under it: that pulse went through where the roof would be;
+  - or it has no last return on or under the surface, but at least 5 of its 8 neighbours are
+    roof, one of them found under the tree (at 3–4 pulses a pixel, a third of the pixels get no
+    pulse through).
+
+  Each patch must show a surface's thin layer: at least 3× (`CANOPY_LAYER`) as many last returns
+  on the surface as in the 0.3 m slab just above (a crown with returns at that height by chance
+  has about as many), and connect to its building. The surface: a plane fitted to the dsm of the
+  building's pixels within 1.5 m (`CANOPY_FIT`) of the nearest visible roof pixel (four rounds,
+  dropping pixels > 0.3 m off; it must fit within 0.1 m, else no surface there: a ridge or step).
+  The rule and every feature still judge the visible roof (`area` too), so no code changes. Only
+  the footprint polygon gets the extra pixels, and `under_canopy` says how many m². Crowns keep
+  their whole shape, so a crown overlaps the footprint where it hangs over the roof.
 - **`crowns`** (GeoPackage): every object with `building` = 0 of at least 5 m²
   (`CROWN_MIN_AREA`), with `roof_seed` in place of `building`. `roof_seed` = 1 is a reject
   that is also in `footprints`; most of those are trees. Smaller tree objects are mostly loose
@@ -277,6 +298,25 @@ under a building the ground is filled in from around it.
     and crowns (all columns), except the big building on the east edge, which the smaller
     run cuts off where its area ends.
   - Review files: `tmp_symlinks/changed_footprints_run23.geojson` (column `what`).
+- **Runs 25–27** (2026-11-09, both sites, 250 m windows), the roof under the canopy (run 27 is
+  the final version; 25 had a stricter "crown over it" test, 26 no layer test):
+  - Chewelah: 49 of 167 buildings got roof under trees, 306 m² in all (median 4.75 m², the
+    most 26 m²). No `building` code changed. `review` flags 32 → 13. Straightening: 8 buildings
+    now straightened that weren't (`outline` 2 or 1 → 0), 3 worse: fid14 0 → 4 (it was already
+    at 9.7% of the 10% area limit), fid120 0 → 2 and fid123 2 → 4 (two neighbours with a ragged
+    1–3 pixel strip of fill). Nine Mile: 0.75 m² on one building, nothing else.
+  - The 2026-11-04 examples: the notches at (447076, 5347170), (446834, 5347208) and
+    (446786, 5347425) filled (10.75, 9.5, 8.5 m²) and lost their flag. The tree that stands on
+    the ground at (447157, 5347292): nothing. The "dense crown" at (446960, 5347018), where the
+    11-04 measurement (one plane per wall) found no layer, got 7.5 m²: per pixel there are 88
+    last returns on the surface against 1 in the slab above, so there is roof under it.
+  - The thin layer: over all the roof found, 3,101 last returns on the surface against 103 in
+    the 0.3 m slab just above (a median of 26 to 1 per building); the layer test dropped only 2 m².
+  - Seam check: four 250 m windows against two 500 m windows give the same footprints (all
+    columns, `under_canopy` too), except the big building on the east edge, as before.
+  - Review file: `tmp_symlinks/under_canopy_run27.geojson` (the 49 buildings, with `outline` and
+    `review` of run 24 and 27, and an empty `what`); `chewelah_segments.vrt` shows the roof under
+    trees as 3. Not checked by Michael yet.
 - **Known limits:**
   - Vehicles, containers and dumpsters look like sheds from above (code 2). A vehicle that
     moved between flight lines gets `cover_min` ~0, but it rarely becomes a footprint anyway:
@@ -296,14 +336,17 @@ under a building the ground is filled in from around it.
   - Thin things sticking out of a wall can become little roof spikes.
   - Simplified outlines (rejects, crowns, buildings the safety net turns down) of big
     diagonal shapes grow ~8%, because simplifying keeps the outer staircase corners.
-  - **Footprints miss the roof under overhanging trees.** Straightening keeps the visible
-    roof: in Chewelah almost every diagonal wall is a tree edge, not a wall. `review` flags
-    them; it only looks at diagonal walls of 4 m or more, so a notch with right angles, or one
-    under 4 m, isn't flagged.
+  - **The roof under overhanging trees is found only where pulses get through** and only up
+    to 2 m from the visible roof. Under a crown no pulse gets through, or further in, it is
+    still missing: 13 notches keep their `review` flag in Chewelah. `review` only looks at
+    diagonal walls of 4 m or more, so a notch with right angles, or one under 4 m, isn't flagged.
+  - **The roof found under a tree is ragged** (pixel by pixel), so it can stop the walls from
+    agreeing (fid120, fid123 in run 27). An opening would also remove the many fills that are
+    one pixel wide.
   - Buildings under 25 m² keep their pixel staircase (their walls are too short to fit).
   - At 0.5 m pixels a pixel is roof if any of its ~4 pulses hits the roof, so outlines sit
-    on average roughly 0.1 m outside the roof edge (a rough estimate: ~5% area on a 10 × 10 m
-    house). Lidar also sees the eaves, not the walls.
+    outside the roof edge: measured 0.15 m for straight walls (see "Measured on 2026-11-09"),
+    ~6% area on a 10 × 10 m house. Lidar also sees the eaves, not the walls.
   - **Buildings without a roof seed were missed** and ended up in `crowns`, e.g. in
     Chewelah (447148, 5347158), (446796, 5347161), `missed_building`. The cause (found
     2026-11-09): `segment()` judged a covered hole only as a whole, and these holes run on
@@ -359,7 +402,7 @@ under a building the ground is filled in from around it.
     continued under the tree: at (447076, 5347170), 120 last returns within ±0.15 m of it
     and none in the 0.3 m slabs just above and below; at (446834, 5347208), 48 against 10
     and 0. Not everywhere: under the dense crown at (446960, 5347018) there is no such
-    layer, and at (447157, 5347292) the tree stands mostly on ground (no notch after all).
+    layer (but per pixel there is: see runs 25–27), and at (447157, 5347292) the tree stands mostly on ground (no notch after all).
     The two trees beside a wall had a layer too (98 and 52): they also hang over the roof
     edge, so there the footprint ends where the tree starts. Method: fit a plane to the
     roof's first returns within 1.5 m of the wall (four rounds, each dropping the points more
@@ -389,6 +432,27 @@ under a building the ground is filled in from around it.
     tile `m_4811743_sw_11_060` on Microsoft Planetary Computer without resampling, in EPSG:26911.
   - The scripts are in the session scratchpad (`vehicle_clue.py`, `why_no_seed.py`,
     `holes_count.py`), which is temporary.
+- **Measured on 2026-11-09** (refining the walls, step 1; buildings.py unchanged):
+  - Method (`walls_step1.py` in the scratchpad; `tmp_symlinks/walls_step1_chewelah.gpkg`: layers
+    `walls_old`, `walls_new`, `wall_points`): for each straight wall of ≥ 3 m of run 24, fit the
+    roof surface to the first returns 0.25–1.5 m inside it (each 0.5 m slice its own height, one
+    slope across: that also fits gable ends, where the roof rises along the wall to the ridge;
+    one plane for the whole wall failed on 287 walls). Roof points: within 0.3 m of it. In each
+    0.5 m slice along the wall, the roof point furthest out; the edge is the median of those plus
+    ln 2 / (ρ · 0.5 m), the median gap between the last point and the edge at ρ roof points per m².
+  - Of 858 walls, 559 (6.4 km) qualify: shift median **−0.15 m** (inward), middle half −0.20 to
+    −0.10, 95% between −0.32 and −0.02; about ±3 cm per wall; 14 roof points per m². The others:
+    poor fit (138, mostly big flat roofs, perhaps parapets), diagonal (52), few points (44), a tree
+    or high points in front (52), into a neighbour (6), shift over 0.5 m (7).
+  - **Michael's rule: a wall may not move out into a neighbour** (2026-11-09: fp33 wall 4 would
+    overlap fp25). It caught 6 walls: five against a building next door at the same height,
+    whose roof points pushed the edge out ~1 m, and fp140 wall 2 (+0.18 m into fp131), which only
+    this rule catches.
+  - Against the ground side: the innermost ground point lies a median 0.16 m inside the roof's
+    edge (slanted pulses under the eaves), so the edge is placed from the roof side only. Not
+    measured: a beam that just catches the edge may put a roof point a little outside it.
+  - Roof under the canopy: see runs 25–27. Scripts: `canopy_compare.py`, `canopy_map.py`
+    (a character map of the evidence per pixel), `canopy_layer.py`.
 
 ## Tests
 Run from the project root, inside a memory cap:
@@ -405,7 +469,7 @@ until that file changes) and runs the network tests only
 (`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
 that is still going. The offline tests don't run in CI yet. The first run (2026-11-05) passed.
 
-- **`test/test_tilestream.py`** (offline, 68 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 70 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -417,8 +481,9 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
   - buildings.py: segmentation, `reclaim_roof` (each step, and objects in one piece),
     outlines and hole filling, straightening (turned shapes, neighbours 1 m apart, the
     safety net), the tree-notch flag, `roughness_inside`, point metrics and `cover_min`
-    (independent of point order), the rule, the codes, and the whole `analyze()` on a synthetic scene
-    (which layer gets what)
+    (independent of point order), the rule and its vehicle guard, the codes, the roof under
+    the canopy, and the whole `analyze()` on two synthetic scenes (which layer gets what, and a
+    tree over a house's corner)
   - the `--exec` contract (arguments, environment variables, PATH, output handling, failure)
   - seam tests for both the Python analysis and `example_dsm.sh`
 - **`test/test_ept.py`** (marked `network`, skipped without `--ept`): no hardcoded
@@ -474,6 +539,7 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `.github/workflows/network-tests.yml`: CI, the network tests on every push.
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 - `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
+- `theoretical_basis.md`: how each step works and why (with mermaid diagrams); keep it in step with the code.
 
 ## Next steps
 1. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
@@ -490,16 +556,18 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      colours differ between years (2023 is much brighter than 2021). Test it first on the
      labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
      alone doesn't separate the hedge (fp120, a building, is brighter).
-   - **Refine the walls with the points.** Move each straightened wall to the boundary
-     between the outermost roof points and the first ground points in front of it. A 10 m
-     wall has ~70 edge pulses at 15/m², so it can be placed to a few cm instead of ±0.25 m.
-     This removes the ~0.1 m outward bias and gets better wherever the data are denser,
-     without changing `RES`.
-   - **Roof under the canopy.** A tree pixel next to a roof becomes roof where its last
-     returns form a thin layer on the roof facet's continued plane (see "Measured on
-     2026-11-04"). That would fill tree notches instead of only flagging them, and be a
-     sharper notch test. Caveats: 8 examples so far, and it assumes the facet continues
-     under the tree with the same slope.
+   - **Refine the walls with the points.** Step 1 (measuring) is done, see "Measured on
+     2026-11-09": walls move in 0.15 m on average, ±3 cm each. Still to do, agreed with
+     Michael: 2. `wall_edge()` in buildings.py with a synthetic test (a known edge, e.g. at
+     x = 10.13 m); 3. use it in `straighten()` with the safety rules (straight walls only;
+     no tree, high points or neighbour in front; the fit and slice rules; at most 0.5 m; no
+     moving out into another roof-seeded object's pixels), then runs and a seam check;
+     4. HANDOFF. Michael still wanted to look at fp114, fp94, fp111 and fp40 in the GeoPackage.
+     Since run 27, walls next to roof found under trees have no roof first returns there:
+     they are "tree in front" and keep their place.
+   - **Roof under the canopy: Michael to check run 27** (`tmp_symlinks/under_canopy_run27.geojson`).
+     Then perhaps: smooth the ragged fills without losing the 1-pixel strips, and look past 2 m
+     under big crowns.
    - Check that the EPT holds the full OPR point cloud: count one OPR LAZ tile's points in
      Chewelah against an EPT read of the same box.
    - a real-data seam test for buildings.py (a network test);

@@ -196,6 +196,17 @@ Two helpers make the fake lidar:
 - `test_tree_notch`: a tree over a roof's corner leaves a diagonal wall with tree in front of
   it, a tree notch of about 5.7 m. The same diagonal with ground in front is a real wall (0),
   and so is a straight wall with a tree beside it.
+- `test_roof_under_canopy`: `roof_under_canopy` on a hand-built scene (`canopy_scene`): a
+  10 x 10 m roof sloping east and north (so a wrong sign in either direction shows) and a
+  crown over its east edge, 2 m over the roof and 4 m beyond it, four pulses per pixel. Where
+  half the pulses reach the roof's surface, the pixels go to the building, exactly the 2 x 4 m
+  under the crown. Beyond the edge one pulse reaches the ground and one hits a branch at the
+  roof's height: the ground hit keeps those pixels tree. A pixel without a pulse through, with
+  roof around it, fills in; a lone pixel just beyond the edge with only roof-height returns
+  isn't connected and stays out. Shuffled points give the same result. Nothing is added for a
+  dense crown (no pulse through), a tree lower than the roof, returns at the roof's height only
+  by chance (as many in the slab just above: no thin layer), or an object that isn't a
+  building. Fails without each of these rules, and with either sign of the north slope flipped.
 
 - `test_analyze_layers`: the whole `analyze()` on synthetic points (`scene_points`): one
   pulse every 0.25 m over flat ground, with a house (flat roof), a tree (a cone whose pulses
@@ -205,9 +216,16 @@ Two helpers make the fake lidar:
   object but too small for a crown. The house gets straight walls (`outline` 0: 4 corners,
   10 x 12 m; this caught a bug where a wall that is a single pixel edge had no direction), the
   rock `outline` 5 (not a building), neither a `review` flag; only footprints have these
-  columns. The tree's polygon lies around its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
+  columns, and neither has roof under trees (`under_canopy` 0). The tree's polygon lies around
+  its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
   its intensity, and `cover_min` 1: the scene has one flight line), and the tree's `top` is its
   highest point, with its own intensity.
+- `test_analyze_roof_under_tree`: the whole `analyze()` on the house with a crown over its
+  north-east corner (`tree_over_house`; every other pulse in the crown gets through). The rule
+  sees the visible roof (under 113 m²); the footprint gets the roof under the tree back
+  (`under_canopy` 5-10 m²): the whole 10 x 12 m with 4 straight walls and no `review` flag. The
+  crown keeps its whole shape over the footprint, and `segments` marks the roof under it (3).
+  Fails with the step switched off.
 - `test_point_metrics`: heights, cover and intensity per object from a handful of points,
   including a return under `MIN_HEIGHT` (counts for `cover`, not for heights), a second
   return (counts for heights, not for intensity), and an object with nothing above

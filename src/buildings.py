@@ -17,8 +17,9 @@ Rasters on a 0.5 m grid:
                 neighbourhood: near 0 on roofs (a hard surface stops the pulse), high in trees
   roughness     how sharply the dsm bends, |Laplacian| (m): ~0 on flat and evenly sloping
                 roofs, high in tree crowns
-  segments      the objects: 1 = grown from a roof seed, 2 = grown from a tree top, 0 = no
-                object, or the edge between two objects (so each crown and roof stands out)
+  segments      the objects: 1 = grown from a roof seed, 2 = grown from a tree top, 3 = a
+                building's roof found under a tree (roof_under_canopy), 0 = no object, or the
+                edge between two objects (so each crown and roof stands out)
 
 Objects: everything higher than MIN_HEIGHT, split into one object per building or tree crown
 by a watershed on the ndsm. The flood starts from two kinds of seeds:
@@ -34,7 +35,9 @@ Each high pixel joins the seed it is "downhill" from, so boundaries fall in the 
 between crowns and roofs. Then tree pixels that are really roof go to the nearest roof: whole
 "tree" objects next to a roof with few split pulses (roof sections where a tree top landed),
 thin pieces next to a roof (eaves, ridges) and tree patches with roof all around them (rooftop
-units). Every tree object stays in one piece.
+units). Every tree object stays in one piece. After the rule, a building also gets the roof
+hidden under the trees next to it, for its footprint only (roof_under_canopy): pixels where the
+pulses that get through the crown end on the roof's surface continued under the tree.
 
 Table "objects": one row per object of at least MIN_AREA. Its point (x, y) is inside the
 object (a roof's pixel furthest from any ground point, a tree's top); the window holding that
@@ -51,7 +54,7 @@ point keeps the row. Columns:
   that came or went between two passes; see cover_min; the rule's vehicle guard)
 
 Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the same columns
-(without roof_seed) and two more:
+(without roof_seed) and three more:
   outline  how the polygon was made (CODES). A building gets straight walls (straighten): one
            main direction per building, walls within SNAP_ANGLE of it (or square to it) turned
            onto it and placed through the middle of their pixel staircase; diagonal walls of at
@@ -61,15 +64,18 @@ Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the s
            is invalid or its area changed too much. Objects that aren't buildings are simplified
            (not under SIMPLIFY_MIN_AREA).
   review   1 for a tree notch (tree_notch): a diagonal wall with tree in front of it, where a
-           tree hangs over the roof and hides part of it.
-Holes under HOLE_FILL are filled. A footprint is the roof seen from above: eaves included, parts
-under overhanging trees missing. The meanings of the codes are stored in the file (coded field
-domains), so QGIS shows the labels.
+           tree hangs over the roof and hides part of it (and roof_under_canopy didn't find it).
+  under_canopy  m^2 of roof found under trees (in the polygon; area and the rule's features are
+           the visible roof's).
+Holes under HOLE_FILL are filled. A footprint is the roof seen from above, eaves included, with
+the roof that pulses through overhanging trees show; under a dense crown it is still missing.
+The meanings of the codes are stored in the file (coded field domains), so QGIS shows the labels.
 
 Layer "crowns" (GeoPackage): the objects that aren't buildings (building = 0) of at least
 CROWN_MIN_AREA, as polygons in the same way, with the same columns (without building). Mostly
 tree crowns. roof_seed = 1 marks a roof-seeded object the rule rejected: it is in footprints
 too. Neighbouring crowns are simplified one by one, so their shared edges can differ a little.
+A crown keeps its whole shape where it hangs over a roof, so it can overlap a footprint.
 
 Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns, and Intensity and
 PointSourceId for POINT_METRICS (tilestream reads all fields unless --dims says otherwise).
@@ -126,6 +132,16 @@ BUILDING_AREA = 4.0     # and an area of at least this (m^2; a 2 x 3 m shed is 6
 VEHICLE_COVER = 0.2     # and no cover_min below this: one flight line saw the ground there, so it came or went
                         # between passes (Chewelah: 0.00 for 5 vehicles that moved, >= 0.29 for every other object)
 SMALL_STRUCTURE = 40    # m^2: a smaller building is a shed, container or RV (40 ft container 30 m^2, big RV 35)
+CANOPY_REACH = 2.0      # m (roof_under_canopy): a building's roof is looked for under trees up to this far
+                        # from its visible roof,
+CANOPY_FIT = 1.5        # m: on the roof surface continued under the tree: a plane fitted to the dsm of the
+CANOPY_FIT_SD = 0.1     # roof pixels within this of the nearest visible roof pixel, which must fit within this (m)
+CANOPY_ON = 0.15        # m: a last return within this of that plane hit the roof,
+CANOPY_TOL = 0.3        # m: one more than this under it went through where the roof would be (the fit also
+                        # drops pixels further off than this)
+CANOPY_LAYER = 3        # a patch of roof under a tree has at least this many times as many last returns on
+                        # the surface as in the slab just above it (Chewelah: 3,101 to 103 over all the
+                        # roof found, a median of 26 per building)
 CODES = {"footprints": {"building": {0: "not a building", 1: "building", 2: "shed, container or RV"},
                         "outline": {0: "straightened", 1: "not straightened: too small",
                                     2: "not straightened: walls don't agree on a direction",
@@ -175,7 +191,6 @@ def analyze(pts, w):
     segments, n_roofs = segment(grids)
 
     out = {name: Raster(r, x0, ytop, RES, nodata=np.nan) for name, r in layers.items()}
-    out["segments"] = Raster(segment_map(segments, n_roofs), x0, ytop, RES, nodata=0)
     out["objects"], labels = objects_table(segments, n_roofs, grids, x0, ytop)
     t = out["objects"]
     if POINT_METRICS:
@@ -184,11 +199,21 @@ def analyze(pts, w):
         t.update(point_metrics(h, first[keep], pts["Intensity"][keep], label, labels))
         t["cover_min"] = cover_min(h, first[keep], label, pixel[keep], pts["PointSourceId"][keep], labels)
     t["building"] = building_code(t)
+    # the roof under trees next to buildings: for their footprints only (the rule and the features
+    # judge the visible roof, and the crowns keep their whole shape, over the roof)
+    last = keep & (pts["ReturnNumber"] == pts["NumberOfReturns"])
+    under = roof_under_canopy(segments, labels[t["building"] > 0], dsm,
+                              (pts["X"][last], pts["Y"][last], pts["Z"][last], pixel[last]), x0, ytop)
+    with_under = np.where(under > 0, under, segments)
+    under_canopy = np.bincount(under.ravel(), minlength=segments.max() + 1)[labels] * RES ** 2
+    out["segments"] = Raster(segment_map(with_under, n_roofs, under), x0, ytop, RES, nodata=0)
     # two polygon layers: footprints = the roof-seeded rows, crowns = the rows that aren't buildings.
     # Most roof-seeded rejects are crowns too, so they are in both until we trust the rule.
     roof = t["roof_seed"] == 1
     crown = (t["building"] == 0) & (t["area"] >= CROWN_MIN_AREA)
     traced = trace(np.where(np.isin(segments, labels[roof | crown]), segments, 0), x0, ytop)
+    grown = np.unique(under[under > 0])  # the buildings with roof under trees: traced again with it
+    traced.update(trace(np.where(np.isin(with_under, grown), with_under, 0), x0, ytop) if len(grown) else {})
     shapes = {i: simplify(g) for i, g in traced.items()}
     # buildings get straight walls where the safety net allows, and a review flag for tree notches
     outline, review = np.full(len(t["x"]), 5), np.zeros(len(t["x"]), int)
@@ -198,12 +223,12 @@ def analyze(pts, w):
         if geom is not None:
             geom.Normalize()
             shapes[i] = geom
-        review[j] = tree_notch(traced[i], i, segments, n_roofs, x0, ytop) > 0
+        review[j] = tree_notch(traced[i], i, with_under, n_roofs, x0, ytop) > 0
 
     def layer(rows, drop, **extra):  # the table's rows, without a column that is the same in every row
         return {**{k: v[rows] for k, v in t.items() if k != drop}, **{k: v[rows] for k, v in extra.items()},
                 "geometry": np.array([shapes[i].ExportToWkt() for i in labels[rows]])}
-    out["footprints"] = layer(roof, "roof_seed", outline=outline, review=review)
+    out["footprints"] = layer(roof, "roof_seed", outline=outline, review=review, under_canopy=under_canopy)
     out["crowns"] = layer(crown, "building")
     return out
 
@@ -450,6 +475,100 @@ def building_code(t):
     """The "building" column (CODES): 0 = not a building, 1 = building, 2 = a building smaller
     than SMALL_STRUCTURE: a shed, container or RV (or a parked truck: from above it is a box too)."""
     return np.where(is_building(t), np.where(t["area"] < SMALL_STRUCTURE, 2, 1), 0)
+
+
+def roof_under_canopy(segments, owners, dsm, last, x0, ytop):
+    """The roof hidden under trees next to the buildings ``owners`` (their labels): a label image
+    with the building each pixel of another object belongs to (0: none). Where a tree hangs over a
+    roof, part of its pulses get through (Chewelah: 20-55%), and their last returns lie on the roof's
+    surface continued under the tree; beyond the roof's edge they reach the ground. ``last`` holds
+    the last returns: (x, y, z, pixel). A pixel of another object within CANOPY_REACH of a building,
+    with its top not under the continued roof surface (a lower tree beside the wall isn't over the
+    roof), is roof:
+      - if one of its last returns lies within CANOPY_ON of the surface and none lies more than
+        CANOPY_TOL under it (that pulse went through where the roof would be);
+      - or, with no last return on or under the surface, if at least 5 of its 8 neighbours are roof
+        and one of them was found under the tree (the evidence has gaps: at 3-4 pulses a pixel, a
+        third of the pixels get no pulse through).
+    Each patch of such pixels must show the thin layer of a surface (CANOPY_LAYER) and connect to
+    its building. The surface: a plane fitted to the dsm of the building's pixels within CANOPY_FIT
+    of the pixel's nearest building pixel (fit_plane)."""
+    ny, nx = segments.shape
+    under = np.zeros_like(segments)
+    building = np.isin(segments, owners)
+    if not building.any():
+        return under
+    dist, (ir, ic) = ndimage.distance_transform_edt(~building, sampling=RES, return_indices=True)
+    cand = (segments > 0) & ~building & (dist <= CANOPY_REACH)
+    r, c = np.nonzero(cand)
+    er, ec = ir[r, c], ic[r, c]  # each pixel's nearest building pixel
+    owner = segments[er, ec]
+    # one plane per nearest building pixel, in metres from its centre (x east, y north)
+    edges, which = np.unique(er * nx + ec, return_inverse=True)
+    planes = np.array([fit_plane(segments, dsm, *divmod(e, nx)) for e in edges]).reshape(-1, 3)[which]
+
+    # each last return in a candidate pixel: its height above the surface there
+    index = np.full(ny * nx, -1)
+    index[r * nx + c] = np.arange(len(r))
+    x, y, z, pixel = last
+    j = index[pixel]
+    m = j >= 0
+    j = j[m]
+    dz = z[m] - (planes[j, 0] + planes[j, 1] * (x[m] - (x0 + (ec[j] + 0.5) * RES))
+                 + planes[j, 2] * (y[m] - (ytop - (er[j] + 0.5) * RES)))
+    on = np.bincount(j[np.abs(dz) <= CANOPY_ON], minlength=len(r))
+    below = np.bincount(j[dz < -CANOPY_TOL], minlength=len(r))
+    above = np.bincount(j[(dz > CANOPY_ON) & (dz <= 3 * CANOPY_ON)], minlength=len(r))  # the slab just above
+    top = planes[:, 0] + planes[:, 1] * (c - ec) * RES + planes[:, 2] * (er - r) * RES  # the surface at the centre
+    with np.errstate(invalid="ignore"):  # NaN: no plane, or no dsm
+        over = dsm[r, c] >= top - CANOPY_ON  # the pixel's top isn't under the roof
+
+    new = np.zeros((ny, nx), bool)
+    new[r, c] = over & (on > 0) & (below == 0)
+    box = np.ones((3, 3), int)
+    box[1, 1] = 0
+    n_roof = ndimage.correlate((building | new).astype(int), box, mode="constant")
+    n_new = ndimage.correlate(new.astype(int), box, mode="constant")
+    gap = over & (on == 0) & (below == 0) & (n_roof[r, c] >= 5) & (n_new[r, c] > 0)
+    new[r[gap], c[gap]] = True
+    # each patch shows a surface's thin layer (a crown with last returns at that height by chance
+    # has about as many just above), and is connected (4-neighbours) to its own building
+    patch, n = ndimage.label(new)
+    on_p, above_p = (np.bincount(patch[r, c], v, n + 1) for v in (on, above))
+    new &= (on_p >= CANOPY_LAYER * above_p)[patch]
+    parts, _ = ndimage.label(building | new)
+    size = segments.max() + 1
+    mine = np.isin(parts[r, c].astype(np.int64) * size + owner,
+                   parts[building].astype(np.int64) * size + segments[building])
+    keep = new[r, c] & mine
+    under[r[keep], c[keep]] = owner[keep]
+    return under
+
+
+def fit_plane(segments, dsm, row, col):
+    """The plane z = a + b dx + c dy (dx east, dy north, in m from the pixel's centre) through the dsm
+    of the pixels of the same object within CANOPY_FIT of pixel (row, col): four rounds, each dropping
+    the pixels more than CANOPY_TOL off. NaN when fewer than 6 pixels are left or they don't fit
+    within CANOPY_FIT_SD (a ridge or a step in the roof)."""
+    k = int(CANOPY_FIT / RES)
+    dr, dc = np.mgrid[-k:k + 1, -k:k + 1]
+    near = np.hypot(dr, dc) * RES <= CANOPY_FIT
+    rr, cc = row + dr[near], col + dc[near]
+    ok = (rr >= 0) & (rr < segments.shape[0]) & (cc >= 0) & (cc < segments.shape[1])
+    rr, cc = rr[ok], cc[ok]
+    z = dsm[rr, cc]
+    ok = (segments[rr, cc] == segments[row, col]) & np.isfinite(z)
+    a = np.c_[np.ones(ok.sum()), (cc[ok] - col) * RES, (row - rr[ok]) * RES]
+    z = z[ok]
+    inl = np.ones(len(z), bool)
+    for _ in range(4):
+        if inl.sum() < 6:
+            return np.full(3, np.nan)
+        coef = np.linalg.lstsq(a[inl], z[inl], rcond=None)[0]
+        inl = np.abs(z - a @ coef) <= CANOPY_TOL
+    if inl.sum() < 6 or np.std(z[inl] - a[inl] @ coef) > CANOPY_FIT_SD:
+        return np.full(3, np.nan)
+    return coef
 
 
 def describe(r, c, g):
@@ -727,9 +846,12 @@ def ring_area(r):
     return abs(np.sum(r[:-1, 0] * r[1:, 1] - r[1:, 0] * r[:-1, 1])) / 2
 
 
-def segment_map(segments, n_roofs):
-    """1 for roof-seeded objects, 2 for tree crowns, 0 elsewhere and on the edges between objects."""
+def segment_map(segments, n_roofs, under=None):
+    """1 for roof-seeded objects, 2 for tree crowns, 3 for a building's roof under a tree (``under``,
+    see roof_under_canopy), 0 elsewhere and on the edges between objects."""
     kind = np.where(segments == 0, 0, np.where(segments <= n_roofs, 1, 2)).astype(np.uint8)
+    if under is not None:
+        kind[under > 0] = 3
     edge = np.zeros(segments.shape, bool)
     edge[:, :-1] |= segments[:, :-1] != segments[:, 1:]
     edge[:-1] |= segments[:-1] != segments[1:]

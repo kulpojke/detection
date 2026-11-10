@@ -639,6 +639,68 @@ def test_tree_notch():
         assert length == (pytest.approx(5.7, abs=0.5) if notch else 0)
 
 
+def canopy_scene(through=(0, 2), over_roof=0.0):
+    """A 10 x 10 m roof (object 1) sloping up to the east and north, 5 m + 0.4 and 0.2 m per m (so a
+    wrong sign in either direction shows), and a crown (object 2,
+    12 m) over its east edge: 2 m over the roof, 4 m beyond it. Four pulses per pixel; those numbered
+    ``through`` get through the crown: on the roof (plus ``over_roof``, per pulse), or beyond it the
+    first on the ground and the second on a branch at the roof surface's height. The others end in
+    the crown (11.5 m). Returns (segments, dsm, last returns, x0, ytop, the roof under it, the roof's plane)."""
+    x0, ytop = 1000.0, 2020.0
+    seg = np.zeros((40, 40), int)
+    roof = np.zeros((40, 40), bool)
+    roof[10:30, 4:24] = True  # x 1002-1012, y 2005-2015
+    crown = np.zeros((40, 40), bool)
+    crown[16:24, 20:32] = True
+    seg[roof] = 1
+    seg[crown] = 2
+    plane = lambda x, y: 5 + 0.4 * (x - 1002) + 0.2 * (y - 2005)
+    cx, cy = x0 + (np.arange(40) + 0.5) * 0.5, ytop - (np.arange(40) + 0.5) * 0.5
+    dsm = np.where(seg == 1, plane(cx[None, :], cy[:, None]), np.where(seg == 2, 12.0, 0.0))
+    r, c = np.nonzero(crown)
+    k = np.arange(4)
+    x = (x0 + (c[:, None] + 0.25 + 0.5 * (k % 2)) * 0.5).ravel()
+    y = (ytop - (r[:, None] + 0.25 + 0.5 * (k // 2)) * 0.5).ravel()
+    pulse = np.tile(k, len(r))
+    hit = np.isin(pulse, through)
+    on_roof = roof[r, c].repeat(4)
+    offset = np.resize(np.asarray(over_roof, float), len(x))
+    ground = pulse == min(through, default=0)  # beyond the roof: the first pulse through
+    z = np.where(~hit, 11.5, np.where(on_roof, plane(x, y) + offset, np.where(ground, 0.0, plane(x, y))))
+    last = (x, y, z, (r * 40 + c).repeat(4))
+    return seg, dsm, last, x0, ytop, roof & crown, plane
+
+
+def test_roof_under_canopy():
+    """Roof under a crown: where half its pulses reach the roof's surface (continued under the
+    tree, sloping), the pixels are the building's; beyond the roof's edge a pulse reaches the ground
+    (a branch at the roof's height doesn't count then), and they stay tree. A pixel no pulse gets
+    through, between roof pixels, fills in; one with only roof-height returns out beyond the edge
+    isn't connected, and doesn't. A dense crown (no pulse gets through) adds nothing, a tree lower
+    than the roof neither, and neither do last returns only by chance at the roof's height (as many
+    just above it: no thin layer)."""
+    seg, dsm, last, x0, ytop, hidden, plane = canopy_scene()
+    under = buildings.roof_under_canopy(seg, [1], dsm, last, x0, ytop)
+    assert ((under == 1) == hidden).all() and set(np.unique(under)) == {0, 1}
+    # one pixel over the roof without a pulse through: its neighbours are roof, so it is too; and
+    # one just beyond the edge (1.1 m from the visible roof) with both pulses at the roof's height, cut
+    # off by ground hits around it
+    x, y, z, pixel = last
+    gap, lone = pixel == 19 * 40 + 21, (pixel == 16 * 40 + 25) & (z < 11.5)
+    z = np.where(gap, 11.5, np.where(lone, plane(x, y), z))
+    under = buildings.roof_under_canopy(seg, [1], dsm, (x, y, z, pixel), x0, ytop)
+    assert ((under == 1) == hidden).all()
+    low = np.where(seg == 2, 5.0, dsm)  # the crown's top under the roof surface: a tree beside it
+    assert not buildings.roof_under_canopy(seg, [1], low, last, x0, ytop).any()
+    order = np.random.default_rng(1).permutation(len(x))  # the order of the points doesn't matter
+    assert (buildings.roof_under_canopy(seg, [1], dsm, tuple(v[order] for v in last), x0, ytop) == under).all()
+    dense = canopy_scene(through=())
+    assert not buildings.roof_under_canopy(dense[0], [1], dense[1], dense[2], x0, ytop).any()
+    chance = canopy_scene(over_roof=[0, 0, 0.3, 0.3])  # half on the surface, half in the slab above
+    assert not buildings.roof_under_canopy(chance[0], [1], chance[1], chance[2], x0, ytop).any()
+    assert not buildings.roof_under_canopy(seg, [3], dsm, last, x0, ytop).any()  # object 1 isn't a building
+
+
 def scene_points():
     """One pulse every 0.25 m over a 40 x 40 m square of flat ground (z = 0), with a 10 x 12 m
     house (a flat roof, 4 m), a tree (a cone, 12 m at the top, 8 m across; its pulses split and
@@ -678,6 +740,7 @@ def test_analyze_layers():
     # the house gets straight walls: 4 corners, its 10 x 12 m; the rock isn't a building. No tree
     # notches. Only footprints have these columns.
     assert fp["outline"][house] == 0 and fp["outline"][rock] == 5 and fp["review"].tolist() == [0, 0]
+    assert fp["under_canopy"].tolist() == [0, 0]  # no tree next to either
     assert "outline" not in cr and "review" not in cr and "outline" not in out["objects"]
     walls = ogr.CreateGeometryFromWkt(fp["geometry"][house[0]])
     assert walls.GetGeometryRef(0).GetPointCount() == 5 and walls.GetArea() == pytest.approx(120, rel=0.02)
@@ -691,6 +754,48 @@ def test_analyze_layers():
     assert fp["cover_min"][house] == 1  # one flight line: the same as cover
     assert cr["top"][tree] == pytest.approx(12 - 2.5 * np.hypot(0.125, 0.125)) and cr["i_mean"][tree] == 300
     assert cr["cover"][tree] > 0.9  # a few edge pixels also hold ground hits
+
+
+def tree_over_house():
+    """scene_points' lattice and 10 x 12 m house (4 m), with a crown (a cone, 9 m at the top, 6 m
+    across) over its north-east corner. Every other pulse in the crown gets through: on the roof, or
+    beyond it on the ground."""
+    s = 0.25
+    x, y = (v.ravel() for v in np.meshgrid(np.arange(1000 + s / 2, 1040, s), np.arange(2000 + s / 2, 2040, s)))
+    house = (abs(x - 1010) < 5) & (abs(y - 2028) < 6)
+    d = np.hypot(x - 1016, y - 2033)
+    tree = d < 3
+    through = tree & (np.rint((x + y) / s - 0.5).astype(int) % 2 == 0)
+    pts = np.zeros(len(x), [("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"), ("Classification", "u1"),
+                            ("ReturnNumber", "u1"), ("NumberOfReturns", "u1"), ("PointSourceId", "u2")])
+    pts["PointSourceId"] = 1
+    pts["X"], pts["Y"] = x, y
+    pts["Z"] = np.select([tree, house], [9 - d, 4], 0)
+    pts["Classification"] = np.where(house | tree, 1, 2)
+    pts["ReturnNumber"], pts["NumberOfReturns"] = 1, np.where(through, 2, 1)
+    second = pts[through].copy()
+    second["ReturnNumber"] = 2
+    second["Z"] = np.where(house[through], 4, 0)
+    second["Classification"] = np.where(house[through], 1, 2)
+    return np.concatenate([pts, second])
+
+
+def test_analyze_roof_under_tree():
+    """A tree over the house's corner: the rule judges the visible roof (~111 m^2), and the
+    footprint gets the roof under the tree back (under_canopy): its whole 10 x 12 m with 4 straight
+    walls, no tree notch. The crown keeps its whole shape, over the footprint; the segments raster
+    marks the roof under it (3)."""
+    from osgeo import ogr
+    w = ts.Window("scene", (1000, 2000, 1040, 2040), (1000, 2000, 1040, 2040))
+    out = buildings.analyze(tree_over_house(), w)
+    fp, cr = out["footprints"], out["crowns"]
+    assert fp["building"].tolist() == [1] and fp["area"][0] < 113 and 5 < fp["under_canopy"][0] < 10
+    walls = ogr.CreateGeometryFromWkt(fp["geometry"][0])
+    assert walls.GetGeometryRef(0).GetPointCount() == 5 and walls.GetArea() == pytest.approx(120, rel=0.02)
+    assert fp["outline"][0] == 0 and fp["review"][0] == 0
+    crown = ogr.CreateGeometryFromWkt(cr["geometry"][0])
+    assert crown.Intersection(walls).GetArea() == pytest.approx(fp["under_canopy"][0], abs=2)
+    assert (out["segments"].data == 3).any()
 
 
 def test_run_resumes_and_limits(tmp_path, fake_ept):
