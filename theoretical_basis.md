@@ -318,8 +318,10 @@ the outermost points, the gap to add is the median gap too: the mean would put t
 
 The gap grows as the density falls: 0.28 m at 5 points per m², 0.69 m at QL2's 2 per m², as big
 as the bias being corrected, and as uncertain. Real points lie along scan lines, more regularly
-than at random; for a regular grid at 14 per m² the median gap is about 0.08 m, so the term is
-good to about 2 cm.
+than at random, and then the gap depends on how the pattern lines up with the wall: on a regular
+grid at 14 per m² it is between about 0.08 m and half the point spacing, 0.13 m. So the term is
+good to 2–4 cm either way. (On the tests' perfect 0.25 m lattice, with the walls along it, they
+land 4 cm too far in.)
 
 **Roof side only.** Two effects make the ground side unreliable:
 

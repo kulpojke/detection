@@ -2,7 +2,8 @@
 
 _Last updated 2026-11-10 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
 `longest_border` (runs 22-24), the vehicle guard, the walls measurement (step 1), the roof
-under the canopy (runs 25-27; not yet checked by Michael) and `wall_edge` (walls step 2))._
+under the canopy (runs 25-27; not yet checked by Michael), `wall_edge` (walls step 2) and
+moving the walls (step 3, run 28))._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -15,7 +16,7 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-09)
-- **Offline suite: 71 passed** (10 network tests skipped), in about 13 s.
+- **Offline suite: 74 passed** (10 network tests skipped), in about 13 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
@@ -556,6 +557,12 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      colours differ between years (2023 is much brighter than 2021). Test it first on the
      labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
      alone doesn't separate the hedge (fp120, a building, is brighter).
+     The same check could clean the **crowns**: Michael found (2026-11-10) that Chewelah run
+     27 crowns fid 4 (446851.25 5347246.75) and fid 186 (446860.25 5347263.25) are railroad
+     crossing signals, not trees. Both are 11–13 m² and ~6.7 m tall; compared with the 362
+     crowns they have low `cover` (0.52, 0.56; p10 0.64) and a high `i_std` (6860, 10639;
+     p90 5968): open metal frames. Only two examples, so no rule yet; NDVI should show them
+     as not green.
    - **Refine the walls with the points.** Step 1 (measuring) is done, see "Measured on
      2026-11-09": walls move in 0.15 m on average, ±3 cm each. Step 2 is done (2026-11-10):
      `wall_edge()` in buildings.py, not used yet, with `test_wall_edge`. It holds the checks
@@ -563,10 +570,32 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      walls of run 24 it agrees with step 1: on the 559 eligible walls a median −0.003 m
      different (90% within 2 cm; up to 0.10 m on short walls with ~5 points/m², where the
      ln 2 / (ρs) term is large), and every step-1 reason maps onto its own. (Script
-     `wall_edge_vs_step1.py` in the scratchpad.) Still to do, agreed with Michael:
-     3. use it in `straighten()` with the checks that need the polygon or the rasters
-     (square walls only; no tree pixels in front; at most 0.5 m; no moving out into another
-     roof-seeded object's pixels; the area check), then runs and a seam check; 4. HANDOFF.
+     `wall_edge_vs_step1.py` in the scratchpad.) Step 3 (2026-11-10), agreed with Michael:
+     3a `refine_walls()` moves a straightened building's walls (corners where the moved lines
+     cross; an invalid result keeps the straightened walls), with `test_refine_walls`. 3b
+     `move_wall()`, refine_walls's shift, adds the checks that need the polygon or the rasters
+     (square walls only, at most `EDGE_MAX` 0.5 m, no tree pixels in front, no moving out into
+     another roof-seeded object's pixel outline: Michael's rule), and `analyze()` uses it
+     (a cKDTree over the window's first returns); new footprint columns `walls_moved` and
+     `wall_shift`, for checking. Tests `test_move_wall`, `test_analyze_moves_walls` (a house at
+     random points: pixel outline over 124 m², moved to 120 ± 2). 3c, run 28 (scratchpad
+     `chewelah28`, `ninemile28`, `chewelah28_500`; compared with run 27 by `walls_compare.py`):
+     only the geometry changed, and only where walls moved. Chewelah: of 117 straightened
+     buildings, 115 had walls moved (592 walls); the median shift per building is −0.157 m
+     (p5 −0.235, p95 −0.088), polygon areas −3.0% (median −6.8 m²); pixel area / polygon
+     area went from 0.999 to 1.027. 1128 m² moved in and 17 m² out; 12 buildings had over
+     0.5 m² move out, most by 1 m² or less against 3–50 m² in. The exception is 447183.25
+     5347208.75 (3.6 m² out, 3.0 in): worth a look in QGIS. Nine Mile: 3 buildings,
+     10 walls, −0.12 m, −3.6%, nothing out. Seam check (500 m windows): all identical
+     except 447239.75 5347431.25, which the 250 m run cuts at x 447300 (the data's edge; run
+     27 too). Analysis ~4–5 s per 250 m window, as before (the fetch is the slow part).
+     Two GDAL warnings in the logs: "Self-intersection" is GEOS reporting a moved shape
+     that `refine_walls` then rejects (outside the site there); "OGR_G_Area() called against
+     non-surface geometry" came from a strip touching a neighbour at a corner (a point), and
+     `move_wall` now measures only area intersections. Still to do: 4. HANDOFF and
+     theoretical_basis.md §7. On the synthetic 0.25 m lattice (`scene_points`), the walls
+     move 4 cm in although the pixel outline is exact: the ln 2 / (ρs) term assumes random
+     points; on a regular pattern it is off by 2–4 cm either way.
      Michael still wanted to look at fp114, fp94, fp111 and fp40 in the GeoPackage.
      At QL2 densities (2/m², Paradise pre-fire) `wall_edge` mostly says "few points", and the
      walls it does measure scatter ±0.15 m (synthetic): it would need a density limit there.

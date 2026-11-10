@@ -680,6 +680,71 @@ def test_wall_edge():
         assert np.isnan(shift) and reason == why
 
 
+def polygon(*rings, ccw=True):
+    """An ogr polygon of rings given by their corners in shape coordinates (turned 30 degrees, as in
+    turn), the outer ring first, each running counter-clockwise or (ccw=False) clockwise."""
+    closed = [np.vstack([turn(r), turn(r)[:1]]) for r in rings]
+    return buildings.from_rings([[r if ccw else r[::-1] for r in closed]])
+
+
+def test_refine_walls():
+    """refine_walls moves each wall along its normal and puts the corners where the moved lines
+    cross. A 12 x 8 m rectangle with every wall 0.2 m in is 11.6 x 7.6 m, whichever way its ring
+    runs; with a courtyard, the courtyard grows; in an L, moving one wall moves only its own two
+    corners. A narrow neck whose walls would pass each other gives no valid shape (None). With
+    nothing moved (0 or NaN), the building comes back as it was."""
+    same = lambda a, b: a.SymmetricDifference(b).GetArea() < 1e-6
+    rect = [(-6, -4), (6, -4), (6, 4), (-6, 4)]
+    inner = [(-5.8, -3.8), (5.8, -3.8), (5.8, 3.8), (-5.8, 3.8)]
+    for ccw in (True, False):
+        geom, n, shift = buildings.refine_walls(polygon(rect, ccw=ccw), lambda p0, p1, out: -0.2)
+        assert same(geom, polygon(inner)) and (n, shift) == (4, -0.2)
+    yard = [(-3, -2), (3, -2), (3, 2), (-3, 2)][::-1]  # a hole runs the other way
+    geom, n, _ = buildings.refine_walls(polygon(rect, yard), lambda p0, p1, out: -0.2)
+    assert same(geom, polygon(inner, [(-3.2, -2.2), (3.2, -2.2), (3.2, 2.2), (-3.2, 2.2)][::-1])) and n == 8
+    # the L's bottom wall 0.3 m in: its normal points down the shape's v axis
+    down = turn([(0, -1)]) - turn([(0, 0)])
+    one = lambda p0, p1, out: -0.3 if np.allclose(out, down[0]) else 0
+    L = [(-6, -4), (6, -4), (6, 0), (1, 0), (1, 4), (-6, 4)]
+    geom, n, _ = buildings.refine_walls(polygon(L), one)
+    assert same(geom, polygon([(-6, -3.7), (6, -3.7), (6, 0), (1, 0), (1, 4), (-6, 4)])) and n == 1
+    neck = [(-7, -3), (-1, -3), (-1, -0.2), (1, -0.2), (1, -3), (7, -3), (7, 3), (1, 3), (1, 0.2),
+            (-1, 0.2), (-1, 3), (-7, 3)]  # two 6 x 6 m rooms joined by a 0.4 m wide neck
+    assert buildings.refine_walls(polygon(neck), lambda p0, p1, out: -0.3) is None
+    geom = polygon(rect)
+    same_geom, n, shift = buildings.refine_walls(geom, lambda p0, p1, out: np.nan)
+    assert same_geom is geom and n == 0 and np.isnan(shift)
+
+
+def test_move_wall():
+    """move_wall passes wall_edge's shift on for a wall square to the building's main direction. The
+    wall stays (0) where it is diagonal, would move more than EDGE_MAX, has tree pixels in front of
+    it, or, moving out, would enter a neighbour (one further out doesn't matter)."""
+    from scipy.spatial import cKDTree
+    p0, p1, out = WALL
+    x0, ytop = -5.0, 5.0
+    seg = np.zeros((40, 40), int)  # 0.5 m pixels over x -5 to 15, y -15 to 5
+    seg[10:] = 1  # the building, y < 0 (n_roofs = 1)
+
+    def move(pts, main=0.0, segments=seg, neighbours=()):
+        x, y, z, h = pts
+        first = cKDTree(np.c_[x, y]), x, y, z, h
+        return buildings.move_wall(p0, p1, out, main, first, segments, 1, list(neighbours), x0, ytop)
+
+    pts = wall_scene(0)
+    assert move(pts) == buildings.wall_edge(p0, p1, out, pts)[0] < 0
+    assert move(pts, main=20) == 0  # 20 degrees off the main direction: a diagonal wall
+    assert move(wall_scene(0, edge=-0.7)) == 0  # more than EDGE_MAX
+    trees = seg.copy()
+    trees[:10, 4:30] = 2  # a crown in front of the wall
+    assert move(pts, segments=trees) == 0
+    outward = wall_scene(0, edge=0.3)
+    assert 0.2 < move(outward) < 0.4
+    beyond = lambda y0: buildings.from_rings([[np.array([(-1, y0), (11, y0), (11, 5), (-1, 5), (-1, y0)])]])
+    assert move(outward, neighbours=[beyond(0.1)]) == 0
+    assert move(outward, neighbours=[beyond(0.6)]) == move(outward)
+
+
 def canopy_scene(through=(0, 2), over_roof=0.0):
     """A 10 x 10 m roof (object 1) sloping up to the east and north, 5 m + 0.4 and 0.2 m per m (so a
     wrong sign in either direction shows), and a crown (object 2,
@@ -782,6 +847,7 @@ def test_analyze_layers():
     # notches. Only footprints have these columns.
     assert fp["outline"][house] == 0 and fp["outline"][rock] == 5 and fp["review"].tolist() == [0, 0]
     assert fp["under_canopy"].tolist() == [0, 0]  # no tree next to either
+    assert fp["walls_moved"][rock] == 0 and np.isnan(fp["wall_shift"][rock])  # not a building
     assert "outline" not in cr and "review" not in cr and "outline" not in out["objects"]
     walls = ogr.CreateGeometryFromWkt(fp["geometry"][house[0]])
     assert walls.GetGeometryRef(0).GetPointCount() == 5 and walls.GetArea() == pytest.approx(120, rel=0.02)
@@ -837,6 +903,38 @@ def test_analyze_roof_under_tree():
     crown = ogr.CreateGeometryFromWkt(cr["geometry"][0])
     assert crown.Intersection(walls).GetArea() == pytest.approx(fp["under_canopy"][0], abs=2)
     assert (out["segments"].data == 3).any()
+
+
+def random_house(seed):
+    """A 10 x 12 m house (a flat roof, 4 m) on a 40 x 40 m square of flat ground, its walls off the
+    pixel grid, measured with one return per pulse at random places, 14 per m^2."""
+    rng = np.random.default_rng(seed)
+    n = rng.poisson(14 * 40 * 40)
+    x, y = rng.uniform(1000, 1040, n), rng.uniform(2000, 2040, n)
+    house = (x > 1005.2) & (x < 1015.2) & (y > 2022.1) & (y < 2034.1)
+    pts = np.zeros(n, [("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Intensity", "u2"), ("Classification", "u1"),
+                       ("ReturnNumber", "u1"), ("NumberOfReturns", "u1"), ("PointSourceId", "u2")])
+    pts["X"], pts["Y"], pts["Z"] = x, y, np.where(house, 4.0, 0.0)
+    pts["Classification"] = np.where(house, 1, 2)
+    pts["ReturnNumber"] = pts["NumberOfReturns"] = pts["PointSourceId"] = 1
+    pts["Intensity"] = 100
+    return pts
+
+
+def test_analyze_moves_walls():
+    """A pixel outline lies outside the roof: a pixel is roof if any of its pulses hits the roof (here
+    over 124 m^2 for the 120 m^2 house). The points move its four straight walls in, to the house's
+    true 120 m^2 (within 2 m^2). The area column stays the pixel area (the visible roof the rule
+    judged). The order of the points doesn't change the footprint."""
+    from osgeo import ogr
+    w = ts.Window("scene", (1000, 2000, 1040, 2040), (1000, 2000, 1040, 2040))
+    pts = random_house(0)
+    fp = buildings.analyze(pts, w)["footprints"]
+    assert fp["building"].tolist() == [1] and fp["outline"][0] == 0
+    assert fp["walls_moved"][0] == 4 and -0.2 < fp["wall_shift"][0] < -0.05
+    assert fp["area"][0] > 124 and ogr.CreateGeometryFromWkt(fp["geometry"][0]).GetArea() == pytest.approx(120, abs=2)
+    shuffled = buildings.analyze(pts[np.random.default_rng(1).permutation(len(pts))], w)["footprints"]
+    assert shuffled["geometry"].tolist() == fp["geometry"].tolist()
 
 
 def test_run_resumes_and_limits(tmp_path, fake_ept):

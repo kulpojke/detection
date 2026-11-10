@@ -205,6 +205,20 @@ Two helpers make the fake lidar:
   rough roof (0.15 m noise: "poor fit") and a tree in front ("high points in front") aren't
   measured. Without the ln 2 / (ρs) term, the per-slice heights, the slope across, the
   height test or any of the three checks, it fails.
+- `test_refine_walls`: `refine_walls` on polygons turned 30° (`polygon`), so no normal lies
+  along an axis. A 12 x 8 m rectangle with every wall 0.2 m in becomes 11.6 x 7.6 m, whether
+  its ring runs counter-clockwise or clockwise. With a courtyard (a hole), the courtyard grows
+  0.2 m on every side. In an L, moving only the bottom wall moves only its two corners. Two
+  6 x 6 m rooms joined by a 0.4 m neck, all walls 0.3 m in, give no valid shape (None). With
+  nothing moved, the same geometry comes back. Fails if it takes every ring's building side
+  as the left, ignores that a hole runs the other way, skips the validity check or moves
+  the walls the wrong way.
+- `test_move_wall`: `move_wall` on `wall_scene`'s points, with a small segments raster (the
+  building at y < 0). It passes `wall_edge`'s shift on for a wall square to the main
+  direction. The wall stays (0) at 20° off the main direction (a diagonal), with its edge
+  0.7 m in (more than `EDGE_MAX`), with a crown's pixels in front of it, and, moving out by
+  0.3 m, into a neighbour 0.1 m out (one 0.6 m out doesn't stop it). Each of those four
+  checks is needed for the test to pass.
 - `test_roof_under_canopy`: `roof_under_canopy` on a hand-built scene (`canopy_scene`): a
   10 x 10 m roof sloping east and north (so a wrong sign in either direction shows) and a
   crown over its east edge, 2 m over the roof and 4 m beyond it, four pulses per pixel. Where
@@ -225,7 +239,8 @@ Two helpers make the fake lidar:
   object but too small for a crown. The house gets straight walls (`outline` 0: 4 corners,
   10 x 12 m; this caught a bug where a wall that is a single pixel edge had no direction), the
   rock `outline` 5 (not a building), neither a `review` flag; only footprints have these
-  columns, and neither has roof under trees (`under_canopy` 0). The tree's polygon lies around
+  columns, and neither has roof under trees (`under_canopy` 0). The rock has no walls moved
+  (`walls_moved` 0, `wall_shift` empty). The tree's polygon lies around
   its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
   its intensity, and `cover_min` 1: the scene has one flight line), and the tree's `top` is its
   highest point, with its own intensity.
@@ -235,6 +250,12 @@ Two helpers make the fake lidar:
   (`under_canopy` 5-10 m²): the whole 10 x 12 m with 4 straight walls and no `review` flag. The
   crown keeps its whole shape over the footprint, and `segments` marks the roof under it (3).
   Fails with the step switched off.
+- `test_analyze_moves_walls`: the whole `analyze()` on a 10 x 12 m house measured at random
+  places, 14 first returns per m² (`random_house`), its walls off the pixel grid. The pixel
+  outline lies outside the roof (`area` over 124 m²); the points move all 4 straight walls in
+  (`walls_moved` 4, `wall_shift` between -0.2 and -0.05 m), to the true 120 m² (within 2 m²).
+  `area` stays the pixel area. Shuffled points give the same footprint. Fails if `analyze`
+  doesn't use `refine_walls`.
 - `test_point_metrics`: heights, cover and intensity per object from a handful of points,
   including a return under `MIN_HEIGHT` (counts for `cover`, not for heights), a second
   return (counts for heights, not for intensity), and an object with nothing above

@@ -54,7 +54,7 @@ point keeps the row. Columns:
   that came or went between two passes; see cover_min; the rule's vehicle guard)
 
 Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the same columns
-(without roof_seed) and three more:
+(without roof_seed) and five more:
   outline  how the polygon was made (CODES). A building gets straight walls (straighten): one
            main direction per building, walls within SNAP_ANGLE of it (or square to it) turned
            onto it and placed through the middle of their pixel staircase; diagonal walls of at
@@ -62,11 +62,15 @@ Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the s
            under STRAIGHT_MIN_AREA, and the simplified one (pixel staircases simplified away by
            SIMPLIFY) where the walls don't agree on a direction (ragged, tree-bitten), the result
            is invalid or its area changed too much. Objects that aren't buildings are simplified
-           (not under SIMPLIFY_MIN_AREA).
+           (not under SIMPLIFY_MIN_AREA). Then the roof's own first returns move the straight
+           walls to the roof's edge (refine_walls, move_wall, wall_edge): a pixel outline lies a
+           little outside the roof, since a pixel is roof if any of its pulses hits the roof.
   review   1 for a tree notch (tree_notch): a diagonal wall with tree in front of it, where a
            tree hangs over the roof and hides part of it (and roof_under_canopy didn't find it).
   under_canopy  m^2 of roof found under trees (in the polygon; area and the rule's features are
            the visible roof's).
+  walls_moved, wall_shift  how many walls the points moved, and their median shift (m;
+           negative: in). For checking; the polygon's area is then a little under area.
 Holes under HOLE_FILL are filled. A footprint is the roof seen from above, eaves included, with
 the roof that pulses through overhanging trees show; under a dense crown it is still missing.
 The meanings of the codes are stored in the file (coded field domains), so QGIS shows the labels.
@@ -86,7 +90,7 @@ PointSourceId for POINT_METRICS (tilestream reads all fields unless --dims says 
 """
 import numpy as np
 from scipy import ndimage
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, cKDTree
 from skimage import measure
 from skimage.segmentation import watershed
 
@@ -134,6 +138,8 @@ EDGE_SLICES = 4         # (so walls of at least 3 m)
 EDGE_OUT = 1.0          # m outside the wall: points up to here are looked at. In the outer half of that strip,
 EDGE_FRONT = 0.2        # past the roof, at most this share may be high points off the roof (a tree in front).
                         # Chewelah: the walls move in a median 0.15 m (middle half 0.10-0.20), the pixel bias
+EDGE_MAX = 0.5          # m (move_wall): a wall moves at most this far (Chewelah: further were 7 of 858 walls,
+                        # mostly next to a building of the same height, whose roof points pushed it out ~1 m)
 BUILDING_MULTI = 0.35   # the rule (is_building): over the whole object, a share of split pulses below this,
 BUILDING_ROUGH = 0.5    # a median roughness_inside below this (m; as ROOF_ROUGH: a rock is a dome),
 BUILDING_SMALL = 25     # m^2: smaller objects need a roughness_inside below BUILDING_ROUGH_SMALL:
@@ -225,12 +231,24 @@ def analyze(pts, w):
     grown = np.unique(under[under > 0])  # the buildings with roof under trees: traced again with it
     traced.update(trace(np.where(np.isin(with_under, grown), with_under, 0), x0, ytop) if len(grown) else {})
     shapes = {i: simplify(g) for i, g in traced.items()}
-    # buildings get straight walls where the safety net allows, and a review flag for tree notches
+    # buildings get straight walls where the safety net allows, which the roof's own first returns
+    # then move to the roof's edge (refine_walls, move_wall), and a review flag for tree notches
     outline, review = np.full(len(t["x"]), 5), np.zeros(len(t["x"]), int)
+    walls_moved, wall_shift = np.zeros(len(t["x"]), int), np.full(len(t["x"]), np.nan)
+    if (t["building"] > 0).any():
+        fx, fy, fz = pts["X"][first], pts["Y"][first], pts["Z"][first]
+        near = (cKDTree(np.c_[fx, fy]), fx, fy, fz, fz - dtm.ravel()[pixel[first]])
     for j in np.flatnonzero(t["building"] > 0):
         i = labels[j]
         geom, _, outline[j] = straighten(traced[i])
         if geom is not None:
+            walls = [r[k:k + 2] for rings in polygon_rings(geom) for r in rings for k in range(len(r) - 1)]
+            main = main_direction_of(walls)[0]
+            others = [traced[k] for k in labels[roof] if k != i]  # pixel outlines: the same in every window
+            moved = refine_walls(geom, lambda p0, p1, out: move_wall(p0, p1, out, main, near, with_under,
+                                                                     n_roofs, others, x0, ytop))
+            if moved is not None:
+                geom, walls_moved[j], wall_shift[j] = moved
             geom.Normalize()
             shapes[i] = geom
         review[j] = tree_notch(traced[i], i, with_under, n_roofs, x0, ytop) > 0
@@ -238,7 +256,8 @@ def analyze(pts, w):
     def layer(rows, drop, **extra):  # the table's rows, without a column that is the same in every row
         return {**{k: v[rows] for k, v in t.items() if k != drop}, **{k: v[rows] for k, v in extra.items()},
                 "geometry": np.array([shapes[i].ExportToWkt() for i in labels[rows]])}
-    out["footprints"] = layer(roof, "roof_seed", outline=outline, review=review, under_canopy=under_canopy)
+    out["footprints"] = layer(roof, "roof_seed", outline=outline, review=review, under_canopy=under_canopy,
+                              walls_moved=walls_moved, wall_shift=wall_shift)
     out["crowns"] = layer(crown, "building")
     return out
 
@@ -836,18 +855,78 @@ def wall_edge(p0, p1, out, pts):
     return float(np.median(outer[have]) + np.log(2) / (rho * EDGE_SLICE)), ""
 
 
+def refine_walls(geom, shift):
+    """The straightened building ``geom`` with its walls moved: (geometry, number of walls moved,
+    their median shift), or None if the result isn't a valid shape (a narrow part whose walls would
+    pass each other). ``shift(p0, p1, out)`` gives the move of the wall from p0 to p1, in m along
+    ``out``, its unit normal pointing out of the building (into the hole, for a hole's wall); 0 or
+    NaN: it stays. Each corner goes to where the moved lines of its two walls cross. Two walls in
+    one line each keep their end there, with a jog between them if they move apart."""
+    moved, polys = [], []
+    for rings in polygon_rings(geom):
+        new = []
+        for k, ring in enumerate(rings):
+            p = ring[:-1]
+            p = p[np.hypot(*(p - np.roll(p, 1, axis=0)).T) > 1e-9]  # no walls of length 0
+            q = np.roll(p, -1, axis=0)  # wall i runs from p[i] to q[i]
+            along = (q - p) / np.hypot(*(q - p).T)[:, None]
+            # the building is on the left of a counter-clockwise outer ring, and of a clockwise hole
+            left = (signed_area(ring) > 0) == (k == 0)
+            out = np.c_[along[:, 1], -along[:, 0]] * (1 if left else -1)
+            s = np.array([shift(a, b, o) for a, b, o in zip(p, q, out)], float)
+            s[~np.isfinite(s)] = 0
+            moved += list(s[s != 0])
+            c = np.sum(out * p, axis=1) + s  # wall i's moved line: out[i] . x = c[i]
+            corners = []
+            for i in range(len(p)):  # corner i, between wall i - 1 and wall i
+                a = np.array([out[i - 1], out[i]])
+                if abs(np.linalg.det(a)) > 1e-9:
+                    corners.append(np.linalg.solve(a, [c[i - 1], c[i]]))
+                else:  # in one line
+                    corners += [p[i] + s[i - 1] * out[i - 1], p[i] + s[i] * out[i]]
+            new.append(np.array(corners + corners[:1]))
+        polys.append(new)
+    if not moved:
+        return geom, 0, np.nan
+    result = from_rings(polys)
+    return (result, len(moved), float(np.median(moved))) if result.IsValid() else None
+
+
+def move_wall(p0, p1, out, main, first, segments, n_roofs, neighbours, x0, ytop):
+    """How far the roof's own first returns move the wall from p0 to p1 of a straightened building,
+    in m along ``out`` (wall_edge; refine_walls's shift). 0 where the wall stays: where it isn't
+    square to the building's main direction (degrees, mod 90; a diagonal is often a tree's edge),
+    wall_edge can't measure it, it would move more than EDGE_MAX, more than EDGE_FRONT of the
+    pixels 0.75 and 1.25 m in front of it belong to trees (``segments``: labels above n_roofs), or,
+    moving out, it would enter one of ``neighbours`` (the pixel outlines of the other roof-seeded
+    objects). ``first``: a cKDTree of the first returns' (x, y), and their x, y, z and height above
+    the ground (noise dropped)."""
+    if abs((np.degrees(np.arctan2(*(p1 - p0)[::-1])) - main + 45) % 90 - 45) > 1:
+        return 0.0
+    tree, x, y, z, h = first
+    length = np.hypot(*(p1 - p0))
+    near = np.array(tree.query_ball_point((p0 + p1) / 2, length / 2 + EDGE_FIT[1] + EDGE_OUT), int)
+    shift, _ = wall_edge(p0, p1, out, (x[near], y[near], z[near], h[near]))
+    if not abs(shift) <= EDGE_MAX:  # NaN too
+        return 0.0
+    along = (p1 - p0) / length
+    a = np.arange(EDGE_END, length - EDGE_END, RES) + RES / 2
+    front = np.concatenate([p0 + a[:, None] * along + d * out for d in (0.75, 1.25)])
+    if np.mean(label_at(front, segments, x0, ytop) > n_roofs) > EDGE_FRONT:
+        return 0.0
+    if shift > 0:
+        strip = from_rings([[np.array([p0, p1, p1 + shift * out, p0 + shift * out, p0])]])
+        inside = (strip.Intersection(g) for g in neighbours if strip.Intersects(g))
+        if any(i.GetDimension() == 2 and i.GetArea() > 0.01 for i in inside):  # touching gives a line: no area
+            return 0.0
+    return shift
+
+
 def tree_notch(geom, label, segments, n_roofs, x0, ytop):
     """Length (m) of the diagonal walls (not snapped, at least MIN_DIAGONAL) in the outline of the
     object ``label`` with mostly tree pixels in front of them: there a tree hangs over the roof and
     hides its corner (the review flag). In front of a real wall is ground or another building.
     Each pixel edge of a wall is looked at from its middle, half a pixel to either side."""
-    ny, nx = segments.shape
-
-    def label_at(xy):  # 0 outside the grid
-        r, c = ((ytop - xy[:, 1]) / RES).astype(int), ((xy[:, 0] - x0) / RES).astype(int)
-        ok = (r >= 0) & (r < ny) & (c >= 0) & (c < nx)
-        return np.where(ok, segments[np.clip(r, 0, ny - 1), np.clip(c, 0, nx - 1)], 0)
-
     pieces = [w for rings in polygon_rings(geom) for r in rings for w in wall_pieces(r)]
     main = main_direction_of(pieces)[0]
     total = 0.0
@@ -860,10 +939,18 @@ def tree_notch(geom, label, segments, n_roofs, x0, ytop):
         e = np.repeat(np.arange(len(p)), n)
         mid = p[e] + ((np.arange(len(e)) - np.repeat(np.cumsum(n) - n, n) + 0.5) / n[e])[:, None] * d[e]
         side = np.c_[-d[e, 1], d[e, 0]] / np.hypot(*d[e].T)[:, None] * RES / 2
-        a, b = label_at(mid + side), label_at(mid - side)
+        a, b = label_at(mid + side, segments, x0, ytop), label_at(mid - side, segments, x0, ytop)
         if np.mean(np.where(a == label, b, a) > n_roofs) > 0.5:
             total += length
     return total
+
+
+def label_at(xy, segments, x0, ytop):
+    """The label of the pixel under each point (n, 2) in map coordinates; 0 outside the grid."""
+    ny, nx = segments.shape
+    r, c = np.floor((ytop - xy[:, 1]) / RES).astype(int), np.floor((xy[:, 0] - x0) / RES).astype(int)
+    ok = (r >= 0) & (r < ny) & (c >= 0) & (c < nx)
+    return np.where(ok, segments[np.clip(r, 0, ny - 1), np.clip(c, 0, nx - 1)], 0)
 
 
 def fill_small_holes(geom):
@@ -901,8 +988,13 @@ def from_rings(polys):
 
 
 def ring_area(r):
-    """Area of a closed ring (shoelace formula)."""
-    return abs(np.sum(r[:-1, 0] * r[1:, 1] - r[1:, 0] * r[:-1, 1])) / 2
+    """Area of a closed ring."""
+    return abs(signed_area(r))
+
+
+def signed_area(r):
+    """The shoelace formula: a closed ring's area, positive if it runs counter-clockwise."""
+    return np.sum(r[:-1, 0] * r[1:, 1] - r[1:, 0] * r[:-1, 1]) / 2
 
 
 def segment_map(segments, n_roofs, under=None):
