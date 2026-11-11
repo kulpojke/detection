@@ -32,7 +32,9 @@ by a watershed on the ndsm. The flood starts from two kinds of seeds:
               ROOF_PIECE seed it.
   tree tops   local maxima of the lightly smoothed ndsm, away from the roof seeds
 Each high pixel joins the seed it is "downhill" from, so boundaries fall in the valleys
-between crowns and roofs. Then tree pixels that are really roof go to the nearest roof: whole
+between crowns and roofs. A roof seed's small pieces flood on their own: one whose flood has
+many split pulses (SEED_TREE_MULTI) was a smooth bit in a crown, and its flood is a tree
+object (merge_parts). Then tree pixels that are really roof go to the nearest roof: whole
 "tree" objects next to a roof with few split pulses (roof sections where a tree top landed),
 thin pieces next to a roof (eaves, ridges) and tree patches with roof all around them (rooftop
 units). Every tree object stays in one piece. After the rule, a building also gets the roof
@@ -81,6 +83,10 @@ tree crowns. roof_seed = 1 marks a roof-seeded object the rule rejected: it is i
 too. Neighbouring crowns are simplified one by one, so their shared edges can differ a little.
 A crown keeps its whole shape where it hangs over a roof, so it can overlap a footprint.
 
+Summary "flown" (one row per window in flown.csv after merge): gps_first and gps_last, the
+window's earliest and latest GpsTime, when the points have it (3DEP: adjusted standard GPS
+time, seconds since 1980-01-06 minus 1e9). Says when that piece was flown, e.g. before a fire.
+
 Needs the fields X, Y, Z, Classification, ReturnNumber and NumberOfReturns, and Intensity and
 PointSourceId for POINT_METRICS (tilestream reads all fields unless --dims says otherwise).
 
@@ -107,6 +113,9 @@ ROOF_MULTI = 0.15       # a roof seed has a smaller share of split pulses than t
 ROOF_ROUGH = 0.5        # and a median roughness below this (m)
 ROOF_PIECE = 20         # m^2: a hole that fails that as a whole (it runs on under trees) is seeded from its
                         # roof-like pieces of at least this (Chewelah: 8 of 2,297 such holes, 5 of them roofs)
+SEED_TREE_MULTI = 0.24  # a seed piece smaller than its building's largest (and than ROOF_PIECE) whose flood has
+                        # at least this share of split pulses is a smooth bit in a crown. Chewelah, Michael's
+                        # labels of 84 such floods (2026-11-10): 8 trees 0.26-0.33, roof parts up to 0.22
 TREE_SMOOTH = 0.5       # m, Gaussian smoothing of the ndsm before finding tree tops
 TREE_TOP_RADIUS = 2.5   # m, a tree top is the highest point within this distance; 1.5 m split
                         # big crowns into 2-3 pieces
@@ -173,6 +182,12 @@ CROWN_MIN_AREA = 5.0    # m^2: smaller tree objects are mostly loose bits just o
                         # snags): in Nine Mile Falls 44% of the tree objects, but 1% of their area
 GROUND = 2
 NOISE = (7, 18)         # low and high noise
+NAIP_GREEN_NDVI = 0.25  # a NAIP pixel is green above this NDVI (Chewelah 2023, Michael's labels: trees from
+                        # 0.29, roof parts up to 0.21)
+NAIP_EDGE = 1.0         # m: naip_green counts only roof pixels at least this far from anything that isn't
+                        # roof. NAIP shows tall things shifted (in Chewelah 1-3 m), so a crown beside a roof
+                        # spills its green onto the roof's edge
+NAIP_FLAG_M2 = 4.0      # m^2 of green on a footprint's roof that set naip_flag
 FEATURES = ("area", "height", "hole_depth", "hole_share", "rectangularity", "multi_return", "roughness",
             "roughness_inside")
 
@@ -259,6 +274,8 @@ def analyze(pts, w):
     out["footprints"] = layer(roof, "roof_seed", outline=outline, review=review, under_canopy=under_canopy,
                               walls_moved=walls_moved, wall_shift=wall_shift)
     out["crowns"] = layer(crown, "building")
+    if "GpsTime" in pts.dtype.names:
+        out["flown"] = {"gps_first": float(pts["GpsTime"].min()), "gps_last": float(pts["GpsTime"].max())}
     return out
 
 
@@ -299,7 +316,10 @@ def segment(g):
     near_roof = ndimage.binary_dilation(roofs > 0, iterations=2)
     tops, _ = ndimage.label(peak & high & ~near_roof)  # touching peak pixels (a tie) make one top
 
-    markers = np.where(tops > 0, tops + n_roofs, roofs)
+    # each seed piece floods with a label of its own: the flood is the same, and merge_parts can
+    # see what each piece took
+    parts, n_parts = ndimage.label(roofs > 0)
+    markers = np.where(tops > 0, tops + n_parts, parts)
     # a small patch next to a taller tree has no top of its own (the tree is higher within
     # TREE_TOP_RADIUS), and the flood never reaches a patch without a seed: seed it at its highest pixel
     patches, n_patches = ndimage.label(high)
@@ -309,7 +329,36 @@ def segment(g):
     for k, rc in enumerate(ndimage.maximum_position(g["ndsm"], patches, unseeded), markers.max() + 1):
         markers[rc] = k
     segments = watershed(np.where(high, -g["ndsm"], 0), markers, mask=high)
+    segments = merge_parts(segments, parts, roofs, n_roofs, g)
     return reclaim_roof(segments, n_roofs, g), n_roofs
+
+
+def merge_parts(segments, parts, roofs, n_roofs, g):
+    """Give the flood of each roof seed piece back to its building. ``segments`` has the pieces
+    (``parts``) as labels 1..n_parts, then the trees; ``roofs`` the building each piece seeds.
+    A small piece (not its building's largest, under ROOF_PIECE) whose flood has SEED_TREE_MULTI
+    or more split pulses was a smooth bit in a dense crown: the 1 m around it hid the tree top,
+    so its flood is the crown, and that becomes a tree object. Returns the labels as segment()
+    makes them: 1..n_roofs the roofs, then the trees."""
+    n_parts = parts.max()
+    building = np.zeros(n_parts + 1, np.int64)
+    building[parts] = roofs
+    seed_area = np.bincount(parts.ravel(), minlength=n_parts + 1) * RES ** 2
+    seed_area[0] = 0
+    largest = np.zeros(n_roofs + 1)
+    np.maximum.at(largest, building, seed_area)  # each building's largest piece
+    small = (seed_area < largest[building]) & (seed_area < ROOF_PIECE)
+    tree = np.zeros(n_parts + 1, bool)
+    if small.any():
+        size = segments.max() + 1
+        with np.errstate(invalid="ignore", divide="ignore"):  # no pulses: NaN, stays roof
+            share = (np.bincount(segments.ravel(), g["split"].ravel(), size)
+                     / np.bincount(segments.ravel(), g["pulses"].ravel(), size))
+        tree = small & (share[:n_parts + 1] >= SEED_TREE_MULTI)
+    new = np.arange(segments.max() + 1) - n_parts + n_roofs  # the trees, right after the roofs
+    new[:n_parts + 1] = building
+    new[np.flatnonzero(tree)] = new.max() + 1 + np.arange(tree.sum())  # and those floods after them
+    return new[segments].astype(segments.dtype)
 
 
 def reclaim_roof(segments, n_roofs, g):
@@ -1058,3 +1107,70 @@ def fill_from_nearest(grid):
     # for every empty pixel: distance to, and row/column of, the nearest non-empty pixel
     dist, (r, c) = ndimage.distance_transform_edt(empty, sampling=RES, return_indices=True)
     return grid[r, c], dist.astype(np.float32)
+
+
+def naip_green(footprints, naip, segments, block=500.0):
+    """NAIP's green on each building's visible roof, as two columns added to the GeoPackage
+    ``footprints`` (detect.py's step 4; a check after the run, not part of analyze):
+      naip_green  m^2 of its roof pixels (segments = 1, inside its polygon) at least NAIP_EDGE from
+                  anything that isn't roof, whose NDVI is above NAIP_GREEN_NDVI and whose green
+                  band is at least its blue one (plants are; blue roofs aren't). NULL where NAIP
+                  has no data, and for objects that aren't buildings.
+      naip_flag   1 if naip_green is at least NAIP_FLAG_M2: perhaps a tree taken as roof (a crown
+                  whose smooth bits seeded it, or one with roof all around it); else 0.
+    ``naip``: 4 bands (red, green, blue, near infrared), any CRS. ``segments``: the run's segments
+    raster. Works in blocks of ``block`` m (by the footprints' x, y): one read of each raster per
+    block."""
+    from osgeo import gdal, ogr
+    gdal.UseExceptions()
+    ogr.UseExceptions()
+    ds = ogr.Open(str(footprints), 1)
+    lay = ds.GetLayer()
+    srs = lay.GetSpatialRef().ExportToWkt()
+    rows = [(f.GetFID(), f["x"], f["y"], f.GetGeometryRef().Clone()) for f in lay if f["building"] > 0]
+    green = {}
+    margin = 100.0  # a building whose point is in the block may reach this far out of it
+    for key in sorted({(int(x // block), int(y // block)) for _, x, y, _ in rows}):
+        x0, y1 = key[0] * block - margin, (key[1] + 1) * block + margin
+        n = round((block + 2 * margin) / RES)
+        grid = dict(format="MEM", outputBounds=(x0, y1 - n * RES, x0 + n * RES, y1), width=n, height=n, dstSRS=srs)
+        seg = gdal.Warp("", str(segments), resampleAlg="near", **grid).ReadAsArray()
+        bands = gdal.Warp("", str(naip), resampleAlg="average", **grid).ReadAsArray().astype(np.float32)
+        red, nir = bands[0], bands[3]
+        has_naip = (red + nir) > 0
+        not_blue = bands[1] >= bands[2]  # plants are greener than blue; metal and painted roofs can
+        # be blue and still reflect near infrared (a blue roof in Chewelah had NDVI ~0.3)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ndvi = np.where(has_naip, (nir - red) / (nir + red), np.nan)
+        # each building of the block burnt in as its index + 1
+        here = [r for r in rows if (int(r[1] // block), int(r[2] // block)) == key]
+        mem = gdal.GetDriverByName("MEM").Create("", n, n, 1, gdal.GDT_Int32)
+        mem.SetGeoTransform((x0, RES, 0, y1, 0, -RES))
+        v = ogr.GetDriverByName("MEM").CreateDataSource("v")
+        vl = v.CreateLayer("l")
+        vl.CreateField(ogr.FieldDefn("k", ogr.OFTInteger))
+        for k, (_, _, _, g) in enumerate(here, 1):
+            ft = ogr.Feature(vl.GetLayerDefn())
+            ft.SetGeometry(g)
+            ft["k"] = k
+            vl.CreateFeature(ft)
+        gdal.RasterizeLayer(mem, [1], vl, options=["ATTRIBUTE=k"])
+        burnt = mem.ReadAsArray()
+        roof = (seg == 1) & (burnt > 0)
+        inner = ndimage.distance_transform_edt(roof) * RES >= NAIP_EDGE  # distance to the nearest non-roof pixel
+        seen = np.bincount(burnt[roof & has_naip], minlength=len(here) + 1)
+        is_green = np.bincount(burnt[inner & (ndvi > NAIP_GREEN_NDVI) & not_blue], minlength=len(here) + 1) * RES ** 2
+        for k, (fid, _, _, _) in enumerate(here, 1):
+            green[fid] = float(is_green[k]) if seen[k] else None
+    for name, kind in (("naip_green", ogr.OFTReal), ("naip_flag", ogr.OFTInteger)):
+        if lay.GetLayerDefn().GetFieldIndex(name) < 0:
+            lay.CreateField(ogr.FieldDefn(name, kind))
+    lay.StartTransaction()
+    for f in lay:
+        m2 = green.get(f.GetFID())
+        f["naip_green"] = m2
+        f["naip_flag"] = None if m2 is None else int(m2 >= NAIP_FLAG_M2)
+        lay.SetFeature(f)
+    lay.CommitTransaction()
+    ds = None
+    return green

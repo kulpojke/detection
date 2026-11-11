@@ -139,6 +139,12 @@ Two helpers make the fake lidar:
   at least `ROOF_PIECE` and stays a roof, and the tree stays a tree. A dense crown on its own,
   with a smooth 9 m² bit at its top, gets no seed. Fails without the second route, when small
   pieces seed too, and when the whole hole becomes the seed.
+- `test_segment_small_seed_in_crown`: a tree over a roof edge, as in
+  `test_segment_separates_tree_over_roof`, but with a 1 m² smooth bit (no split pulses) next
+  to its top. That bit is a roof-like piece of the roof's hole, so it is seeded with the
+  roof, and no tree top may lie within 1 m of it: its flood takes the crown. The crown must
+  still become a tree (`merge_parts`, `SEED_TREE_MULTI`). Fails without `merge_parts`: the
+  tree top is then in the roof.
 - `test_is_building`: the rule, on real objects from Nine Mile Falls and Chewelah: the house
   and the shed are buildings; a crown with a roof seed (split pulses, rough) and the rock
   (rough inside) are not. A 16 m² bush (0.36 inside) fails, because small objects must be
@@ -266,6 +272,24 @@ Two helpers make the fake lidar:
   that reaches only 1 of its 4 pixels (it grazes the edge and sees the ground) doesn't count, and
   neither does a second return. An object without points gets NaN. Shuffled points give the
   same result.
+
+**After the run: NAIP, detect.py**
+- `test_naip_green`: an 8 x 8 m roof with a 3 x 3 m green patch in its middle (a tree taken as
+  roof), a green 0.5 m strip along its edge (a crown beside it, shifted onto the roof in NAIP)
+  and a blue patch with a high NDVI (a metal roof). Only the patch counts: `naip_green` 9 m²,
+  `naip_flag` 1. An object that isn't a building gets NULL. Without the edge rule it would be
+  13 m², without the blue check 10 m².
+- `test_keep_both_and_join_parts`: two lidar sets in one square (detect.py). A building both
+  saw whole keeps the bigger outline (`keep_both`); a building cut by the edge between them
+  (each saw a part, overlapping 1 m) becomes one footprint (`join_parts`): the union, with the
+  areas added up less the overlap, and both sets in `lidar`.
+- `test_add_flown_and_flown_areas`: when the lidar was flown (detect.py, `--before`). Set A was
+  flown in two parts, before a date and after it, with a strip of both between them; set B only
+  before. Each footprint gets the dates under its corners from its own set(s) (`add_flown`):
+  before, across the edge, after, a building of both sets, and NULL where its set has no map.
+  `flown.gpkg` has the three periods with the right areas, and the km² inside the area
+  (`flown_areas`). Without NaN outside a set's map, the area outside B's map would count as
+  "before".
 
 **--exec analyses** (a shell command per window instead of a Python function)
 - `test_exec_contract`: what the command gets. The arguments are its own, then the LAZ

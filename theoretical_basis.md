@@ -6,7 +6,10 @@ WA_NorthEast_2_B22, at 12–15 pulses/m²: Chewelah (a town) and Nine Mile Falls
 houses). `HANDOFF.md` has the history and `test/README.md` lists what each test checks.
 
 State on 2026-11-10: everything described here is in the code. Since run 28 the walls of
-straightened buildings move to where the points put them (section 7).
+straightened buildings move to where the points put them (section 7), and since run 29 a small
+roof seed piece whose flood is a crown makes a tree (section 3). `detect.py` runs a whole area,
+joins lidar sets where they meet, maps when each part was flown and looks at NAIP's green on the
+roofs (section 8).
 
 ---
 
@@ -104,10 +107,11 @@ flowchart TD
   Q -- yes --> S1["Roof seed: its roof-like pieces of 1 m² or more"]
   Q -- no --> S2["Roof seed: its roof-like pieces of 20 m² or more, if any"]
   H --> TT["Tree tops: local maxima within 2.5 m of the smoothed ndsm, not within 1 m of a roof seed"]
-  S1 --> W["Watershed on −ndsm from all seeds"]
+  S1 --> W["Watershed on −ndsm from all seeds, each seed piece with its own label"]
   S2 --> W
   TT --> W
-  W --> RR["reclaim_roof: tree pixels that are really roof go to a roof"]
+  W --> MP["merge_parts: each piece's flood back to its building, unless a small piece flooded a crown (split 0.24 or more): then a tree"]
+  MP --> RR["reclaim_roof: tree pixels that are really roof go to a roof"]
 ```
 
 **The watershed.** Turn the ndsm upside down (−ndsm), so that tops become basins, and flood it
@@ -128,6 +132,28 @@ In Chewelah 8 of 2,297 such holes have one, and 5 of them are buildings.
 **Tree tops.** Local maxima of the ndsm, smoothed with a 0.5 m Gaussian, within 2.5 m: at 1.5 m,
 big crowns split into 2–3 pieces. Tops within 1 m of a roof seed are dropped, since eaves and
 parapets aren't trees. A high patch with neither kind of seed is seeded at its highest pixel.
+
+**Small seed pieces in a crown (`merge_parts`).** A dense crown over a roof's edge hides the
+ground too, so it belongs to the roof's covered hole, and a smooth bit of it (a few pixels with
+no split pulse) can be one of the hole's roof-like pieces. That bit is then a roof seed, the
+1 m rule drops the tree's top next to it, and its flood takes the whole crown into the roof.
+Michael found this in Chewelah: a 47 m² tree in a corner of a building, seeded by a 1 m² bit.
+
+So each seed piece floods with a label of its own. The flood itself doesn't change: the
+watershed takes pixels in order of height, and which label a seed carries doesn't change that
+order, so the pieces of a building together get exactly the pixels they got before (checked:
+with the rule off, the labels equal the old ones on both test sites). Afterwards each flood goes
+back to its building, except the flood of a small piece (not the building's largest, and under
+`ROOF_PIECE`) that has 0.24 or more split pulses (`SEED_TREE_MULTI`): that flood is a crown, and
+becomes a tree object. Then `reclaim_roof` treats it like any other tree, so its thin edges along
+the roof still go back to the roof.
+
+Why the split pulses of the flood, not the size of the piece: Michael labelled the 84 floods of
+such pieces in Chewelah. Trees grew from pieces of 1–4.5 m², but so did many roof parts (porches,
+lower sections). The floods' split shares separate them: trees 0.26–0.33, roof parts at most
+0.22. One flood at 0.26 is a roof edge with shrubs below it; `reclaim_roof` and the roof under the
+canopy give two thirds of it back. Three small trees stay in their roofs (0.12–0.22). In run 29
+11 of 189 footprints changed, by −344 m² in all, and no building appeared or disappeared.
 
 **`reclaim_roof`.** The flood can call roof "tree" in three ways:
 
@@ -373,7 +399,78 @@ moved walls give 120 ± 2 m². The footprints' `area` column stays the pixel cou
 
 ---
 
-## 8. How we know it works
+## 8. A whole area (`detect.py`): several lidar sets, and a look at NAIP
+
+**Squares.** `detect.py` lays 500 m squares on a grid in the output CRS (NAD83(2011) UTM at the
+area's centre) and keeps those that touch the area (a fire perimeter, say) and where an EPT's
+octree has data. tilestream reads each with its 50 m border (section 1), several processes at
+once. Each window also reports its earliest and latest GPS time, so every square says when it
+was flown.
+
+**Where two lidar sets meet.** Each set runs on its own squares, so the squares they share run
+twice. In a square only one set has points in, its objects are taken. In a square both have
+points in, the objects of both are taken, except:
+
+- two outlines that overlap by more than half of the smaller one are the same object, seen
+  twice. The bigger one stays: at the edge of its data a set sees a building cut off, so the
+  bigger outline is the more complete one;
+- two outlines that overlap less are the two parts of one object that the data's edge cut:
+  each set sees its own side, and the parts overlap in the strip where both have points. They
+  are joined: the union, with the areas added up less the overlap.
+
+Each object's `lidar` column names its set (or both). Why not take each square from one set:
+in the Camp Fire test, in three squares where the sets meet, the set with the most points would
+have lost 96 buildings that only the other set saw.
+
+**When it was flown (`flown_map`, `add_flown`, `--before`).** A lidar set can be flown on
+several dates, in parts, and its name doesn't say so. B4 2018 over the Camp Fire was flown in a
+strip through Paradise in July 2018, and everything west of it in December 2018, February 2019
+and August 2019, after the fire. The squares' GPS times show this, but one square can hold both.
+So `detect.py` maps each set's dates at 10 m: it reads each square again, thinned to about 5 m
+(the EPT octree's upper levels, a small share of the points), and keeps the first and the last
+GPS time in each cell. A footprint's dates (`flown_first`, `flown_last`) are those of the cells
+under its corners and its x, y, from its own set(s). With `--before DATE` (a fire's start),
+`buildings.gpkg` keeps only the buildings with `flown_last` before it, and `flown.gpkg` shows
+where the sets together were flown before, after, or both. Why it matters: lidar flown after a
+fire sees only the buildings that still stand, so the others aren't absent, they are missing.
+The flights meet along lines: only 0.2 km² of B4's 170 km² have points of both.
+
+**NAIP's green on the roof (`naip_green`).** The lidar's clues miss some trees: in Chewelah three
+small ones stayed in their roofs (section 3). Colour sees them. For each building, `naip_green`
+is the m² of its visible roof (`segments` = 1, inside its polygon) where NAIP's pixel is green:
+NDVI = (near infrared − red) / (near infrared + red) above 0.25, and the green band at least as
+bright as the blue one. Only roof pixels at least 1 m from anything that isn't roof count.
+`naip_flag` = 1 from 4 m². Why each part:
+
+- **NDVI above 0.25.** On Michael's labels (2023 NAIP), the trees' median NDVI was 0.29 or more,
+  the roof parts' 0.21 or less.
+- **Green at least blue.** A blue metal roof in Chewelah had NDVI above 0.25 over 1,100 m²:
+  metal reflects near infrared. Plants are greener than they are blue. The labelled trees keep
+  most of their green pixels (shares of 0.38–0.83, from 0.38–0.98).
+- **1 m from the roof's edge.** NAIP is made true to the ground, so tall things appear shifted
+  away from the camera. Over all Chewelah crowns: in 2021 east, 1 m for crowns of 2–6 m, 2 m for
+  6–12 m, 3 m above; in 2023 west, 1.5–2.5 m. A crown beside a roof spills its green onto the
+  roof's edge. A tree taken as roof is mostly inside it.
+- **4 m².** fid 61 in Chewelah keeps two small trees in its roof; after the edge rule 5.75 m² of
+  them are green.
+
+Results: in Chewelah run 29 (NAIP 2023) 16 of 167 buildings are flagged. Of the four greenest,
+one is a tree or hedge taken as a building and one has tree parts in it; one is a green-painted
+roof and one a big white roof that street trees lean onto in NAIP. In the Paradise test (NAIP
+2018, flown 9–14 days after the lidar) 16 of 319 (5%) are flagged; the three greenest all hold
+trees. So it is a flag for a look, not a verdict. It needs NAIP close to the lidar's date: in
+Chewelah, 2021's NAIP sees 3 of the 12 labelled trees, 2023's 10.
+
+Where it breaks: tall trees next to roofs. Over the whole Camp Fire run (NAIP 2018) 21% of the
+buildings are flagged: 2–8% in central Paradise, up to 67% among the tall pines of east Paradise.
+There, shifting NAIP 3 m west takes two-thirds of the green off the roofs (4,568 → 1,513 m² on
+424 buildings; 3 m east doubles it). That is the pines' lean in NAIP, not trees in the roofs:
+`NAIP_EDGE` (1 m) is enough for Chewelah's trees, not for 30–40 m pines. A next step: align
+NAIP to the lidar's crowns block by block before counting.
+
+---
+
+## 9. How we know it works
 
 - **Seam tests:** different window layouts give identical outputs (section 1), the moved walls
   included.
@@ -382,19 +479,24 @@ moved walls give 120 ± 2 m². The footprints' `area` column stays the pixel cou
 - **Every rule has a test that fails without it.** This is checked by running the tests against
   deliberately broken copies of the code.
 - **Real objects labelled in QGIS** by Michael: the rock, the sheds, the vehicles, a hedge, a
-  log pile, the 24 seedless candidates and the footprints of each change.
+  log pile, the 24 seedless candidates, the 97 seed floods and patches of the reclaim survey, and
+  the footprints of each change.
 
 ---
 
-## 9. Main assumptions, and where they break
+## 10. Main assumptions, and where they break
 
 | assumption | why it mostly holds | where it breaks |
 |---|---|---|
 | Roofs are opaque | solid materials | glass roofs; skylights (holes under 1 m² are filled) |
 | Roofs are made of smooth planes | most roofs | gravel roofs with equipment, parapets (walls keep their pixel place) |
 | The ground classification is right | the USGS ground filter | a terrace on a steep slope can look like a roof |
+| Smooth, high, with no ground under it, is a roof | buildings are | bridges and power-line wires over canyons and water (Camp Fire: the Pulga railway bridge; 105 code 2 objects more than 12 m up, most of them wire) |
 | Buildings are rectilinear | most buildings | round or curved buildings (no straightening, `outline` 2) |
 | Things stay put between passes | buildings do | parked vehicles look like sheds |
 | Objects are under ~100 m | halo of 50 m | big warehouses would need a larger halo |
-| ~12–15 pulses/m² | thresholds tuned there | QL2 data (≥ 2/m², Paradise pre-fire): retune and re-check |
-| A hedge isn't a roof | lidar: few split pulses, smooth | a dense trimmed hedge passes (NAIP colour would catch it) |
+| A lidar set's name gives its date | most sets are flown in weeks | B4 2018 (Camp Fire): July 2018 and three flights after the fire; `detect.py` maps the dates (section 8) |
+| ~12–15 pulses/m² | thresholds tuned there | much sparser data: retune and re-check (Paradise pre-fire, QL2 on paper, has 9.8/m²) |
+| A crown's smooth bit doesn't seed a roof | its flood has split pulses (`merge_parts`) | a crown whose flood has few split pulses |
+| A hedge isn't a roof | lidar: few split pulses, smooth | a dense trimmed hedge passes (`naip_flag` may catch it) |
+| NAIP's green is a plant | NDVI above 0.25 and green at least blue | green-painted roofs, roof gardens; tall trees shifted onto a roof by more than 1 m (east Paradise: 3 m, up to 67% of houses flagged) |

@@ -358,6 +358,25 @@ def test_segment_seeds_roof_in_hole_under_tree():
     assert segments[20, 38] > 1 and segments[48, 15] > 1  # both trees are trees
 
 
+def test_segment_small_seed_in_crown():
+    """A smooth bit of 1 m^2 in a dense crown over a roof edge is a roof-like piece of the roof's
+    hole, so it is seeded with the roof, and the 1 m around it hides the tree top: its flood takes
+    the crown. That flood has many split pulses (SEED_TREE_MULTI), so the crown is a tree after all."""
+    y, x = np.mgrid[0:50, 0:50]
+    roof = (y >= 5) & (y < 35) & (x >= 5) & (x < 35)  # a flat 15 x 15 m roof, 4 m high
+    cone = 8 - 1.2 * np.hypot(x - 36, y - 20)  # a tree on the roof's right edge, 8 m at the top
+    crown = cone > np.where(roof, 4, 2.5)
+    smooth = (y >= 19) & (y < 21) & (x >= 37) & (x < 39)  # 2 x 2 pixels by the top where no pulse split
+    ndsm = np.where(crown, cone, np.where(roof, 4, 0)).astype(np.float32)
+    split = (crown & ~smooth).astype(np.float32)
+    g = {"ndsm": ndsm, "ground_gap": np.where(ndsm > 2, 2, 0).astype(np.float32),  # no ground under either
+         "multi_return": split, "roughness": split, "pulses": np.ones((50, 50)), "split": split}
+    segments, n_roofs = buildings.segment(g)
+    assert n_roofs == 1 and segments[20, 36] > 1  # the tree top is not in the roof
+    assert (segments[roof & ~crown] == 1).all()  # the roof keeps all of its own pixels
+    assert np.sum(segments[crown] != segments[20, 36]) <= 2  # as in test_segment_separates_tree_over_roof
+
+
 def test_is_building():
     """The rule on real objects from Nine Mile Falls and Chewelah (bush, big house), and edge cases."""
     t = {k: np.array(v, dtype=float) for k, v in {
@@ -1087,3 +1106,135 @@ def test_exec_example_dsm_is_seamless(tmp_path, fake_ept):
     assert valid.mean() > 0.95 and mosaic[valid].max() < 670  # noise dropped; the hole is nodata
     with open(grid_out / "info.csv") as f:
         assert len(list(csv.DictReader(f))) == 8  # one summary row per window
+
+
+# --------------------------------------------------------------------------- after the run: NAIP, detect.py
+
+def write_tif(path, bands, x0, ytop, res=0.5, srs="EPSG:6339"):
+    """A GeoTIFF from a (bands, rows, cols) array."""
+    from osgeo import gdal, osr
+    gdal.UseExceptions()
+    bands = np.asarray(bands)
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), bands.shape[2], bands.shape[1], bands.shape[0],
+                                              gdal.GDT_Float32)
+    ds.SetGeoTransform((x0, res, 0, ytop, 0, -res))
+    sr = osr.SpatialReference()
+    sr.SetFromUserInput(srs)
+    ds.SetProjection(sr.ExportToWkt())
+    for i, b in enumerate(bands, 1):
+        ds.GetRasterBand(i).WriteArray(b)
+    ds = None
+
+
+def write_polygons(path, layer, rows, srs="EPSG:6339"):
+    """A GeoPackage layer of polygons: rows of ({column: value}, WKT)."""
+    from osgeo import ogr, osr
+    ogr.UseExceptions()
+    sr = osr.SpatialReference()
+    sr.SetFromUserInput(srs)
+    ds = ogr.GetDriverByName("GPKG").CreateDataSource(str(path))
+    lay = ds.CreateLayer(layer, sr, ogr.wkbPolygon)
+    for k, v in rows[0][0].items():
+        lay.CreateField(ogr.FieldDefn(k, ogr.OFTString if isinstance(v, str) else
+                                      ogr.OFTReal if isinstance(v, float) else ogr.OFTInteger))
+    for values, wkt in rows:
+        f = ogr.Feature(lay.GetLayerDefn())
+        for k, v in values.items():
+            f[k] = v
+        f.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+        lay.CreateFeature(f)
+    ds = None
+
+
+def box_wkt(x0, y0, x1, y1):
+    return f"POLYGON(({x0} {y0},{x1} {y0},{x1} {y1},{x0} {y1},{x0} {y0}))"
+
+
+def test_naip_green(tmp_path):
+    """An 8 x 8 m roof with a 3 x 3 m green patch in its middle (a tree taken as roof), a green
+    0.5 m strip along its edge (a crown beside it, shifted onto the roof in NAIP) and a blue patch
+    with a high NDVI (a metal roof). Only the patch counts: 9 m^2, so naip_flag is 1. An object
+    that isn't a building gets NULL."""
+    from osgeo import ogr
+    x0, ytop = 500000.0, 4400020.0
+    seg = np.zeros((40, 40), np.float32)
+    seg[8:24, 8:24] = 1  # the roof: x 4-12 m, y 8-16 m below ytop
+    naip = np.full((4, 40, 40), 100, np.float32)  # grey: NDVI 0
+    plant, blue = [50, 90, 50, 200], [50, 120, 200, 150]  # R, G, B, NIR: NDVI 0.6 and 0.5
+    naip[:, 13:19, 13:19] = np.array(plant)[:, None, None]
+    naip[:, 8, 8:24] = np.array(plant)[:, None]  # the roof's top row
+    naip[:, 20:22, 10:12] = np.array(blue)[:, None, None]
+    write_tif(tmp_path / "seg.tif", seg[None], x0, ytop)
+    write_tif(tmp_path / "naip.tif", naip, x0, ytop)
+    roof = box_wkt(x0 + 4, ytop - 12, x0 + 12, ytop - 4)
+    write_polygons(tmp_path / "fp.gpkg", "footprints", [
+        ({"x": x0 + 8, "y": ytop - 8, "building": 1}, roof),
+        ({"x": x0 + 16, "y": ytop - 16, "building": 0}, box_wkt(x0 + 15, ytop - 17, x0 + 17, ytop - 15))])
+    buildings.naip_green(tmp_path / "fp.gpkg", tmp_path / "naip.tif", tmp_path / "seg.tif")
+    ds = ogr.Open(str(tmp_path / "fp.gpkg"))
+    rows = [(f["building"], f["naip_green"], f["naip_flag"]) for f in ds.GetLayer()]
+    assert rows == [(1, 9.0, 1), (0, None, None)]
+
+
+def test_keep_both_and_join_parts(tmp_path):
+    """Two lidar sets in one square. A building both saw whole: the bigger outline stays. A
+    building cut by the edge between them (each saw a part, overlapping 1 m): one footprint, the
+    union, with the areas added up less the overlap, and both sets named."""
+    import detect
+    from osgeo import ogr
+    out = tmp_path
+    for ept, rows in (("A", [({"area": 100.0, "under_canopy": 0.0}, box_wkt(0, 0, 10, 10)),
+                             ({"area": 40.0, "under_canopy": 0.0}, box_wkt(20, 0, 30, 4))]),
+                      ("B", [({"area": 104.0, "under_canopy": 0.0}, box_wkt(0, 0, 10.4, 10)),
+                             ({"area": 50.0, "under_canopy": 2.0}, box_wkt(20, 3, 30, 8))])):
+        (out / "lidar" / ept / "footprints").mkdir(parents=True)
+        write_polygons(out / "lidar" / ept / "footprints" / "sq.gpkg", "footprints", rows)
+    keep = detect.keep_both(out, ["A", "B"], "sq", ["A", "B"], "footprints")
+    assert keep == {"A": [2], "B": [1, 2]}  # the whole building from B (bigger); both parts of the cut one
+    rows = [({"area": 40.0, "under_canopy": 0.0, "lidar": "A"}, box_wkt(20, 0, 30, 4)),
+            ({"area": 104.0, "under_canopy": 0.0, "lidar": "B"}, box_wkt(0, 0, 10.4, 10)),
+            ({"area": 50.0, "under_canopy": 2.0, "lidar": "B"}, box_wkt(20, 3, 30, 8))]
+    write_polygons(out / "all.gpkg", "footprints", rows)
+    assert detect.join_parts(out / "all.gpkg", "footprints", [(0, 0, 500, 500)]) == 1
+    ds = ogr.Open(str(out / "all.gpkg"))
+    got = sorted((f["lidar"], f["area"], f["under_canopy"], round(f.GetGeometryRef().GetArea(), 6)) for f in ds.GetLayer())
+    assert got == [("B", 104.0, 0.0, 104.0), ("B + A", 80.0, 2.0, 80.0)]  # 50 + 40 - 10 overlap
+
+
+def test_add_flown_and_flown_areas(tmp_path):
+    """Set A was flown in two parts: x < 500 m before the date (2018-07-07), x 500-600 m both (the
+    edge between the flights), x >= 600 m after (2019-02-21); set B only x < 500 m, before
+    (2018-07-08). Each footprint gets the dates under its corners from its set(s): NULL where its
+    set has none. flown.gpkg: the three periods, and their km^2 inside the area (x < 800 m)."""
+    import detect
+    from osgeo import ogr, osr
+    x0, y0 = 500000.0, 4400000.0
+    july7, july8, feb21 = (float((np.datetime64(d) - np.datetime64("1970-01-01")).astype(int))
+                           for d in ("2018-07-07", "2018-07-08", "2019-02-21"))
+    first, last = np.full((50, 100), feb21, np.float32), np.full((50, 100), feb21, np.float32)
+    first[:, :60], last[:, :50] = july7, july7
+    write_tif(tmp_path / "A.tif", [first, last], x0, y0 + 500, res=10.0)
+    write_tif(tmp_path / "B.tif", np.full((2, 50, 50), july8, np.float32), x0, y0 + 500, res=10.0)
+    maps = {"A": tmp_path / "A.tif", "B": tmp_path / "B.tif"}
+    write_polygons(tmp_path / "fp.gpkg", "footprints", [
+        ({"x": x0 + l + 3, "y": y0 + 23, "lidar": s}, box_wkt(x0 + l, y0 + 20, x0 + r, y0 + 28))
+        for s, l, r in (("A", 20, 28), ("A", 495, 505), ("A", 700, 708), ("A + B", 20, 28), ("B", 700, 708))])
+    detect.add_flown(tmp_path / "fp.gpkg", "footprints", maps)
+    ds = ogr.Open(str(tmp_path / "fp.gpkg"))
+    assert [(f["flown_first"], f["flown_last"]) for f in ds.GetLayer()] == [
+        ("2018-07-07", "2018-07-07"), ("2018-07-07", "2019-02-21"), ("2019-02-21", "2019-02-21"),
+        ("2018-07-07", "2018-07-08"), (None, None)]
+    utm, lonlat = osr.SpatialReference(), osr.SpatialReference()
+    utm.ImportFromEPSG(6339)
+    lonlat.ImportFromEPSG(4326)
+    for s in (utm, lonlat):
+        s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    area = ogr.CreateGeometryFromWkt(box_wkt(x0, y0, x0 + 800, y0 + 500))
+    area.Transform(osr.CoordinateTransformation(utm, lonlat))
+    shares = detect.flown_areas(tmp_path, maps, "2018-11-08", "EPSG:6339", area)
+    assert shares == {"area": 0.4, "before": (0.25, 0.25), "after": (0.2, 0.1), "both": (0.05, 0.05)}
+    ds = ogr.Open(str(tmp_path / "flown.gpkg"))
+    got = {}
+    for f in ds.GetLayer():
+        got[f["period"]] = got.get(f["period"], 0) + f.GetGeometryRef().GetArea()
+    assert {k: round(v) for k, v in got.items()} == {"before": 250000, "both": 50000, "after": 200000}

@@ -2,8 +2,10 @@
 
 _Last updated 2026-11-10 (Claude, after `cover_min`, `ROOF_PIECE`, the merge limit,
 `longest_border` (runs 22-24), the vehicle guard, the walls measurement (step 1), the roof
-under the canopy (runs 25-27; not yet checked by Michael), `wall_edge` (walls step 2) and
-moving the walls (step 3, run 28))._
+under the canopy (runs 25-27), `wall_edge` (walls step 2), moving the walls (step 3, run 28)
+the small seeds in crowns (`merge_parts`, run 29, from Michael's survey labels), and
+`detect.py` with the NAIP check (`naip_green`), the flight dates (`--before`) and the Camp Fire
+pre-fire run (`runs/camp_fire_prefire`))._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -15,16 +17,24 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 `src/buildings.py` (see "Building detection"). tilestream stays the reading layer; no
 building logic goes into it.
 
-## Status (2026-11-09)
-- **Offline suite: 74 passed** (10 network tests skipped), in about 13 s.
+## Status (2026-11-10)
+- **Camp Fire, pre-fire buildings (2026-11-10, Michael's request, for someone else):**
+  `src/detect.py` ran buildings.py over the whole fire perimeter from both pre-fire sets
+  (`runs/camp_fire_prefire/`, git-ignored; its `README.md` says where everything came from).
+  A first, automatic result: nobody has checked it building by building yet. See "Camp Fire run".
+  **B4 is only partly pre-fire:** a strip through central and eastern Paradise was flown
+  2018-07-07, everything west of it after the fire (2018-12-29, 2019-02-21, 2019-08-09). So
+  western Paradise has no pre-fire buildings; `detect.py --before` leaves its survivors out.
+- **Offline suite: 78 passed** (10 network tests skipped), in about 25 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
-- **First use case: the 2018 Camp Fire** (Paradise, CA), once building detection works.
-  `camp_lidar_memo.md` lists the pre-fire (Jul 2018), post-fire (2019) and recovery (Nov
-  2021) 3DEP sets, all with EPTs. Paradise pre-fire is only in
-  `USGS_LPC_CA_NoCAL_Wildfires_B4_2018`, which is **QL2** (≥ 2 pulses/m²), while the
-  thresholds here were tuned at 12–15 pulses/m². tilestream already reads these EPTs (they
-  are EPSG:3857 like WA; the default CRS becomes NAD83(2011) UTM 10N).
+- **First use case: the 2018 Camp Fire** (Paradise, CA). `camp_lidar_memo.md` lists the
+  pre-fire (Jul 2018), post-fire (2019) and recovery (Nov 2021) 3DEP sets, all with EPTs.
+  Paradise pre-fire is only in `USGS_LPC_CA_NoCAL_Wildfires_B4_2018`, **QL2** on paper (≥ 2
+  pulses/m²) but measured (2026-11-10, central Paradise) at **9.8 pulses/m²** (17.7 points,
+  5.2 ground points per m²), flown 2018-07-07, so the Chewelah thresholds fit. But only a strip
+  of B4 is pre-fire (above); the memo's "87%, all of Paradise" was wrong. tilestream reads
+  these EPTs (EPSG:3857 like WA; the default CRS becomes NAD83(2011) UTM 10N, EPSG:6339).
 - **tilestream, new since then:**
   - an analysis can return polygons (features), which become GeoPackages;
   - `codes` / `CODES`: the meaning of coded columns is stored inside the GeoPackage.
@@ -60,6 +70,22 @@ so a forgotten `--bbox` can't start a run over all 167 billion points.
         --analysis src/example_peaks.py                        # or: --exec src/example_dsm.sh --halo 5
     $P src/tilestream.py merge out/
 
+- **One command for buildings over an area: `src/detect.py`** (2026-11-10). It plans 500 m
+  squares that touch the area and have data, runs buildings.py over them with tilestream in
+  `--jobs` processes, combines several lidar sets, adds the NAIP check and writes a README:
+
+      $P src/detect.py runs/NAME --ept EPT [EPT ...] --area AREA.geojson [--naip NAIP.vrt] \
+          [--before 2018-11-08] [--jobs 12] [--note "a line for the README"]   # or --bbox ...
+  Rerun the same command to resume (finished squares are skipped; combining, NAIP and the
+  README run again). Where two sets have points in one square, objects come from both: the
+  bigger outline of the same object seen twice (`keep_both`, overlap > half), and the parts of a
+  building cut by the data's edge joined (`join_parts`). The rasters and `windows.gpkg` take each
+  square from the set with the most points. Every run maps when each 10 m of each set was flown
+  (`flown/<set>.tif`, from a thinned read of the GPS times: ~4 min per 800 squares) and gives
+  each footprint `flown_first` / `flown_last`; with `--before DATE`, `buildings.gpkg` keeps only
+  the buildings flown before it and `flown.gpkg` shows where. For a long run, freeze the code first (copy `src/`
+  into the run's `code/` and run that `detect.py`), so edits to `src/` don't reach processes
+  that start later.
 - **Areas:**
   - `--bbox XMIN YMIN XMAX YMAX`: a grid over a box.
   - `--bboxes sites.csv`: one window per row (`xmin,ymin,xmax,ymax[,name]`).
@@ -141,7 +167,12 @@ under a building the ground is filled in from around it.
     (20 m²) only; without such a piece it gets no seed (added 2026-11-09).
   - **tree tops:** local maxima within 2.5 m.
 
-  Patches without a seed get one at their highest pixel. Afterwards `reclaim_roof()`
+  Patches without a seed get one at their highest pixel. Each piece of a roof seed floods
+  with its own label (the flood is the same: label numbers don't change its order), and
+  `merge_parts()` gives the floods back to their building, except a small piece's (not its
+  building's largest, under `ROOF_PIECE`) whose flood has ≥ `SEED_TREE_MULTI` (0.24) split
+  pulses: a smooth bit in a dense crown, whose 1 m keeps the tree top out, so its flood is
+  the crown. That flood becomes a tree object (added 2026-11-10). Afterwards `reclaim_roof()`
   gives "tree" pixels that are really roof to the nearest roof:
   - whole "tree" objects touching a roof with fewer split pulses than `ROOF_MULTI` (0.15),
     or than `RECLAIM_MULTI` (0.2) from `RECLAIM_AREA` (25 m²) up: roof sections and roof
@@ -229,6 +260,19 @@ under a building the ground is filled in from around it.
   (`CROWN_MIN_AREA`), with `roof_seed` in place of `building`. `roof_seed` = 1 is a reject
   that is also in `footprints`; most of those are trees. Smaller tree objects are mostly loose
   bits just over 2 m: in Nine Mile 44% of the tree objects, but 1% of their area.
+- **`flown`** (summary, `flown.csv` after merge; added 2026-11-10): each window's earliest and
+  latest `GpsTime` (`gps_first`, `gps_last`), so every square says when it was flown.
+  detect.py turns them into dates in `windows.gpkg` and the README.
+- **NAIP check, `naip_green()`** (2026-11-10; run after the merge by detect.py's `--naip`, not
+  part of `analyze`): `naip_green` = m² of a building's visible roof (`segments` = 1, inside its
+  polygon) at least 1 m (`NAIP_EDGE`) from anything that isn't roof, where NAIP's NDVI > 0.25
+  (`NAIP_GREEN_NDVI`) and green ≥ blue; `naip_flag` = 1 from 4 m² (`NAIP_FLAG_M2`). NULL for
+  non-buildings and where NAIP has no data. Why each part: theoretical_basis.md §8 (a blue
+  metal roof in Chewelah had NDVI > 0.25 over 1,100 m²; NAIP shifts crowns 1–3 m onto roof
+  edges). Chewelah run 29 with NAIP 2023: 16 of 167 flagged (fid 61's leftover trees: 5.75 m²,
+  flagged; fp 37's: 3.75, not); of the four greenest, two real (a tree or hedge as a building,
+  tree parts in a roof), a green-painted roof, street trees leaning onto a white roof. Paradise
+  test (NAIP 2018): 16 of 319; the three greenest all hold trees.
 - **The rule, `is_building()`:** only roof-seeded objects can be buildings. Over the whole
   object, it needs all of:
   - split pulses < 0.35;
@@ -333,7 +377,10 @@ under a building the ground is filled in from around it.
     shed (0.54) is still 1 among 10: a parked car (0.50), a utility box (0.49), bushes
     (0.34–0.69), the log pile (0.34) and unknown things (0.29, 0.38).
   - `reclaim_roof` can absorb a crown hanging over a roof if its link to the outside is
-    thinner than ~2.5 m. Example: the house at (446776, 5347492).
+    thinner than ~2.5 m. Example: the house at (446776, 5347492), fid 61. Since run 29 that
+    crown is a tree again, but only because the seed rule freed the crowns next to it (the
+    patch now touches them, so it no longer has roof all around); the thin-neck case itself
+    is unchanged.
   - Thin things sticking out of a wall can become little roof spikes.
   - Simplified outlines (rejects, crowns, buildings the safety net turns down) of big
     diagonal shapes grow ~8%, because simplifying keeps the outer staircase corners.
@@ -455,6 +502,46 @@ under a building the ground is filled in from around it.
   - Roof under the canopy: see runs 25–27. Scripts: `canopy_compare.py`, `canopy_map.py`
     (a character map of the evidence per pixel), `canopy_layer.py`.
 
+## Camp Fire run (2026-11-10)
+Michael's request, to pass on to someone: building footprints from before the fire. A first,
+automatic result, a test case to refine later. Everything is in `runs/camp_fire_prefire/`
+(git-ignored); its `README.md` has the exact command, the sources and the columns.
+- **Inputs:** the NIFC perimeter (CAL FIRE, 153,336 acres) in `inputs/`; B4 2018 (QL2) and
+  PlumasNF B2 2018 (QL1). 2,801 squares of 500 m touch the perimeter: B4 has data in 814,
+  B2 in 1,722, 2,378 have points. NAIP 2018 (flown 2018-07-16 to 07-21): 35 tiles, about
+  15 GB, in `tmp_symlinks/camp_fire_inputs/naip_2018/` (`naip_2018.vrt`). Planetary
+  Computer's token expires after about an hour; `naip_fetch.py` (scratchpad) skips the
+  tiles it has, so rerun it.
+- **Run:** the squares ran 16:11–18:55 with 12 processes, from a frozen copy of the code
+  (`code/`). Each later run of the same command redoes only combine (~15 min), the date
+  maps (~6 min, kept in `flown/`), NAIP (~15 min), the README and the zip.
+- **B4's dates (found in this run):** B4 was flown before the fire (2018-07-07) only in a
+  strip through central and eastern Paradise; west of it on 2018-12-29, 2019-02-21 and
+  2019-08-09. Of the 620 km², 423 (68%) have pre-fire lidar, 99 (16%) only post-fire (B4's
+  west), 98 (16%) none (the southwest edge). Hence `--before` and `flown.gpkg`;
+  `camp_lidar_memo.md` is corrected.
+- **Results:** 28,513 buildings; **24,440 flown before the fire** in `buildings.gpkg` (15,862
+  code 1, 8,578 code 2; 11,490 from B4, 12,910 from B2, 40 joined across the seam). The
+  others stay in `footprints.gpkg`: 4,036 flown after the fire (survivors, western Paradise)
+  and 37 on the edge between two B4 flights. The kept buildings were all flown 2018-07-07 to
+  07-18. Median roof 83 m² (5th percentile 5.5, 95th 360). Crowns: 4.98 M (4.6 GB).
+- **NAIP flag:** 21% flagged, 2–8% in central Paradise, up to 67% in east Paradise. There,
+  shifting NAIP 3 m west takes two-thirds of the green off the roofs: the tall pines' lean,
+  not trees in roofs. The README says so; aligning NAIP to the lidar's crowns per block is a
+  next step.
+- **To pass on:** `share/camp_fire_prefire.zip` (26 MB): README, buildings, footprints,
+  windows, flown and inputs.
+- **False buildings found:** bridges and power-line wires over the canyons and reservoirs
+  (smooth, high, no ground under them). The Pulga railway bridge (631109, 4397408) is a code 1
+  building. 105 code 2 objects stand more than 12 m up (most are wire pieces, e.g. 31 over the
+  reservoir at 628800, 4393050, 72-83 m above the water; 74 are above 20 m). The README gives
+  the count and a filter (`NOT (building = 2 AND height > 12)`); no rule in the code yet. A
+  rule could use height for code 2 and the wire class or water under an object.
+- **Checked:** the dates; the counts add up; a central Paradise box flags the same buildings
+  as the earlier test; pictures over NAIP in central and east Paradise, of the reservoir and
+  the bridge. **Not checked:** buildings one by one, the other code 2 objects in the forest
+  (35% of the buildings; many are small), the thresholds on QL1 B2.
+
 ## Tests
 Run from the project root, inside a memory cap:
 
@@ -470,7 +557,7 @@ until that file changes) and runs the network tests only
 (`pytest -m network --ept WA_NorthEast_2_B22`). A new push to the same branch cancels a run
 that is still going. The offline tests don't run in CI yet. The first run (2026-11-05) passed.
 
-- **`test/test_tilestream.py`** (offline, 70 tests): synthetic points stand in for the
+- **`test/test_tilestream.py`** (offline, 75 tests): synthetic points stand in for the
   EPT. The synthetic data includes a slope, location-based noise points and a hole.
   The buildings.py tests use small hand-made arrays and real values from the test sites.
   - window planning and exactly-once coverage
@@ -522,7 +609,9 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
   permanent fix is still to be decided: move that folder away if nothing uses it, or
   keep exporting the variable.
 - `tilestream.py` sets PROJ_DATA/GDAL_DATA itself, so the env's python works without
-  `conda activate`.
+  `conda activate`. A script that uses GDAL's coordinate systems without importing
+  tilestream needs `PROJ_DATA=~/miniforge3/envs/tilestream/share/proj` (else "PROJ:
+  proj_create_from_database: Open of .../share/proj failed").
 - PDAL prints harmless "(PDAL Error) Can't load library ... libhdf5_cpp.so.320" errors
   (the HDF reader plugin) with no trailing newline. They can merge with the next line of
   output when you filter logs.
@@ -532,6 +621,13 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `src/example_peaks.py`: example Python analysis (1 m DSM plus local maxima).
 - `src/example_dsm.sh`: example `--exec` analysis (1 m DSM with the `pdal` command-line tool).
 - `src/buildings.py`: building detection (an `--analysis` file; see "Building detection").
+- `src/detect.py`: buildings over a whole area in one command (see "How to use it").
+- `runs/` (git-ignored): detect.py runs. `runs/camp_fire_prefire/`: the Camp Fire pre-fire
+  buildings (`buildings.gpkg`), with `README.md`, `inputs/` (the perimeter, the NAIP tile list),
+  `code/` (the code the squares ran with), `flown/` and `flown.gpkg` (the flight dates) and
+  `share/camp_fire_prefire.zip` (what to pass on).
+- `tmp_symlinks/camp_fire_inputs/` (git-ignored): the perimeter as downloaded, NAIP 2018
+  (`naip_2018/`, 35 tiles as they are, `tiles.json`, `naip_2018.vrt`), the STAC search results.
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
 - `test/test_tilestream.py`, `test/test_ept.py`: the tests.
 - `test/README.md`: what each test checks.
@@ -543,14 +639,25 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `theoretical_basis.md`: how each step works and why (with mermaid diagrams); keep it in step with the code.
   A web page made from it (one self-contained HTML file, kept by hand in step with the .md) is
   published privately on claude.ai: https://claude.ai/artifact/A479foxZU67XFnEWae5gKx (last
-  updated 2026-11-10, run 28). Michael would like it on GitHub Pages later.
+  updated 2026-11-10: merge_parts, detect.py, NAIP, flight dates). Michael would like it on GitHub Pages later.
 
 ## Next steps
-1. Camp Fire preparation: measure the density in Paradise (B4, QL2, against the 2021
-   recovery set) on a 300 m box, and check `GpsTime` of the pre-fire tiles used (B4's and
-   B2's official windows run past 2018-11-08).
+1. **Camp Fire:** Michael looks at `runs/camp_fire_prefire` (see "Camp Fire run": start with
+   the code 2 objects in the forest, `review` = 1, and the squares where the two sets meet:
+   `lidar` with a "+"). Open: western Paradise has no pre-fire lidar. Other sources for its
+   buildings? (Ideas, not checked: CAL FIRE's damage inspection (DINS) points of the
+   structures the fire reached; building footprints made from imagery.) Then the NAIP
+   alignment (below), perhaps the post-fire set (`USGS_LPC_CA_NoCal_Wildfires_CampFire_2018`,
+   QL1, 2019) for what burned, and the recovery sets (2021). Done 2026-11-10: the density and
+   dates, the run, the flight dates.
+   - **NAIP alignment:** before counting green, shift NAIP per block (e.g. 250 m) to where
+     its NDVI best matches the lidar's crowns (nDSM), so tall trees no longer lean onto
+     roofs. Measured: 3 m in east Paradise (see "Camp Fire run").
+   - **Bridges and wires:** a rule against them (see "Camp Fire run"), e.g. a height limit for
+     code 2 and a look at the classes under an object (water, wire).
 2. Later for buildings:
-   - **NAIP as a review column** (agreed with Michael 2026-11-09), e.g. `green_share`: the
+   - **NAIP as a review column: done 2026-11-10 as `naip_green` / `naip_flag`** (see Building
+     detection; detect.py `--naip`). The plan it came from (agreed with Michael 2026-11-09), e.g. `green_share`: the
      share of pixels with NDVI above ~0.25 inside the footprint shrunk by 1–2 m, from the
      NAIP nearest in time. Only from ~25 m², as a flag (like `review`), not a verdict, and
      optional, so buildings.py still works without it. Why: colour catches what the shape
@@ -560,6 +667,16 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      colours differ between years (2023 is much brighter than 2021). Test it first on the
      labelled objects (the 24 candidates and the 9 footprints of run 22). Lidar intensity
      alone doesn't separate the hedge (fp120, a building, is brighter).
+     **Measured 2026-11-10** on Michael's labels (`reclaim_survey.gpkg`, 12 trees, 80 not):
+     2023 NDVI flags 10 of 12 trees and none of the 80 (median > 0.25; trees ≥ 0.29, others
+     ≤ 0.21); 2021 only 3. The lidar was flown 2022-07-16 to 07-19 (GpsTime). The lean, over
+     all Chewelah crowns (`naip_shift.py`): 2021 east, 1 m for 2–6 m crowns, 2 m for 6–12 m,
+     3 m above; 2023 west, 1.5–2.5 m. So a small patch on a roof edge can lose its green:
+     id 85 (fp 121, a 4.8 m crown) is green on only 39% of its pixels in 2023 and its median
+     is roof (`tmp_symlinks/seed85.png`, script `seed_pic.py`). Use the green share, not the
+     median: > ~0.35 flags 11 of 12 and none of the 80 (highest 0.29, a narrow gap). Next:
+     test a footprint-level green measure on run 29 before writing code, since trees beside a
+     house will lean their green onto its roof.
      The same check could clean the **crowns**: Michael found (2026-11-10) that Chewelah run
      27 crowns fid 4 (446851.25 5347246.75) and fid 186 (446860.25 5347263.25) are railroad
      crossing signals, not trees. Both are 11–13 m² and ~6.7 m tall; compared with the 362
@@ -604,9 +721,49 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
      walls it does measure scatter ±0.15 m (synthetic): it would need a density limit there.
      Since run 27, walls next to roof found under trees have no roof first returns there:
      they are "tree in front" and keep their place.
-   - **Roof under the canopy: Michael to check run 27** (`tmp_symlinks/under_canopy_run27.geojson`).
+   - **Roof under the canopy: Michael checked run 27** (`tmp_symlinks/under_canopy_run27.geojson`).
      Then perhaps: smooth the ragged fills without losing the 1-pixel strips, and look past 2 m
-     under big crowns.
+     under big crowns. First findings (2026-11-10): fid 182 and fid 61 each hold a tree, but
+     neither comes from roof_under_canopy (both were in run 24 already; scratchpad
+     `canopy_check.py`, `reclaim_check.py`, pictures `tmp_symlinks/canopy_fid*.png`):
+     - fid 61, tree 467 over the middle of the roof (20.5 m², top 4.3 m above it): reclaim_roof's
+       thin pieces cut its 1–1.5 m link to the ground, and the rest, with roof all around, was
+       taken as a rooftop unit.
+     - fid 182's upper-left corner (17 m², split share 0.38, roughness 1.85; the roof 0.05,
+       0.07): segment() seeded the tree itself, from a 4-pixel smooth bit (exactly `MIN_AREA`,
+       1 m²). Every roof-like piece of a hole gets the building's label, and no tree top may
+       lie within 1 m of a roof seed, so the roof flooded the whole tree.
+     - NAIP NDVI on these two: 2021 misses both (the corner −0.17), 2023 catches both (+0.37,
+       +0.47) but also calls 34% of fid 61's own roof green. So agreed: fix with the lidar,
+       NDVI stays a review flag (see the NAIP item above).
+     - **Survey for Michael to label** (`tmp_symlinks/reclaim_survey.gpkg`, a real file; script
+       `reclaim_survey.py` in the scratchpad, which won't overwrite labels): layer
+       `roof_all_around` (13 Chewelah patches taken because roof surrounds them; only fid 61's
+       is green, and it alone has last returns > 1 m under the roof, `to_ground` 0.17) and
+       `small_seeds` (84 smaller seed pieces in a building with a bigger one, with what each
+       one's flood took; `hint` "roof-like" for 38 with split share < 0.15 and roughness
+       < 0.5). Columns: split share, roughness, height above the roof around it, `through`
+       (last returns within 0.3 m of that roof), `to_ground` (more than 1 m under it), NDVI
+       2021/2023. Michael fills `what` (tree / unit / roof / …); the rules come from that.
+     - **Labelled by Michael (2026-11-10), all 97.** `roof_all_around`: 12 rooftop boxes and
+       fid 61's tree; no lidar rule separates one tree (judging "enclosed" before the thin cut
+       also throws out 3 boxes), so that step stays. `small_seeds`: 11 trees/shrubs, 3 mixed,
+       1 unclear, the rest roof parts, porches, pads, HVAC; none of the 38 "roof-like" is a
+       tree. The seed's size doesn't separate them (trees from 1–4.5 m² seeds, roof parts as
+       small); the flood's split share does: trees 0.26–0.33, roof parts ≤ 0.22, and id 54
+       (fp 164, "edge of roof, perhaps with shrubs below") at 0.26. So `SEED_TREE_MULTI` = 0.24.
+       Misses: ids 14, 21 (fp 61), 94 (fp 37), all green in 2023.
+     - **Run 29** (scratchpad `chewelah29`; `seed_rule_check.py`, `seed_compare.py`): with the
+       rule off, `segment()` gives the committed labels exactly (Chewelah and Nine Mile).
+       Nine Mile: no change. Chewelah: 11 of 189 footprints change, no building is lost or
+       gained; −344 m² of `area` on buildings. fp 90 −126 (a 127 m² tree, 8 m over the roof),
+       fp 61 −61 (two seeded trees, and tree 467: see the thin-neck limitation), fp 182 −48
+       (Michael's corner), fp 164 −34.5 (id 54; `under_canopy` 2.75 → 13.75 and `review`
+       0 → 1: worth a look), fp 126 −33.5, fp 121 −27 (id 85), fp 71 −15.5 (survey id 33,
+       listed there as fp 70). `review` went 1 → 0 on fp 90 and fp 126. All 12 rooftop boxes
+       stay in their footprints. fp 172 (`building` 0, so not in the survey) gives 7.5 m².
+     - Agreed (2026-11-10): the lidar rule (done) **and** the NDVI review flag (next; see the
+       NAIP item above).
    - Check that the EPT holds the full OPR point cloud: count one OPR LAZ tile's points in
      Chewelah against an EPT read of the same box.
    - a real-data seam test for buildings.py (a network test);
