@@ -462,8 +462,6 @@ def summary(out, epts, chosen, before=None):
         if layer == "footprints" and lay:
             lay.SetAttributeFilter("building > 0")
             counts["buildings"] = counts["kept"] = lay.GetFeatureCount()
-            lay.SetAttributeFilter("building = 2 AND height > 12" + (f" AND flown_last < '{before}'" if before else ""))
-            counts["tall_small"] = lay.GetFeatureCount()
             if lay.GetLayerDefn().GetFieldIndex("naip_flag") >= 0:
                 lay.SetAttributeFilter("building > 0 AND naip_flag = 1" + (f" AND flown_last < '{before}'" if before else ""))
                 counts["flagged"] = lay.GetFeatureCount()
@@ -647,8 +645,15 @@ All layers are in **{srs}** (NAD83(2011) / UTM; metres).
   smaller (walls moved onto the roof's edge) or bigger (`under_canopy`).
 - `under_canopy`: m² of roof found under overhanging trees, in the polygon but not in `area`.
 - `height`: median height of the roof above the ground, m. `top`, `h_p95`: higher points.
-- `outline`: how the polygon was made: 0 straight walls; other codes keep the pixel outline or a
-  simplified one (the codes are stored in the file; QGIS shows their labels).
+- `ground_slope`: slope of the ground {buildings.GROUND_RING[0]:g}-{buildings.GROUND_RING[1]:g} m around the object, degrees. A building stands on
+  ground less steep than {buildings.BUILDING_MAX_SLOPE:g}° ({buildings.SMALL_MAX_SLOPE:g}° for code 2): steeper are rocks, cliffs and road fills.
+- `ground_tpi`: how far that ground lies above the ground {buildings.TPI_RING[0]:g}-{buildings.TPI_RING[1]:g} m away, m (negative: low, as on a
+  canyon's floor). Code 2 lies above {buildings.SMALL_MIN_TPI:g} m: lower were boulders on river beds.
+- `outline`: how the polygon was made: 0 straight walls; 6 the main rectangle (the outline was
+  crinkly: a pixel outline, or bitten by trees; an L or T shape becomes one rectangle too; only
+  the biggest part counts: a small part beside a house can be a rectangle under another code); other
+  codes keep the pixel outline or a simplified one (the codes are stored in the file; QGIS shows
+  their labels).
 - `review`: 1 = a tree hides part of the roof (a notch): the footprint may be too small there.
 {"- `naip_green`: m² of NAIP green (NDVI > " + f"{buildings.NAIP_GREEN_NDVI:g}" + ") on the visible roof, away from its edge; `naip_flag` = 1 when that is at least " + f"{buildings.NAIP_FLAG_M2:g}" + " m²: perhaps a tree taken as roof (NAIP leans tall trees by metres, so check)." + chr(10) if a.naip else ""}- `flown_first`, `flown_last`: when the lidar under the object was flown (dates, UTC): the first and
   the last point in the {FLOWN_CELL:g} m cells of `flown/<set>.tif` under its corners and its x, y.
@@ -667,10 +672,16 @@ All layers are in **{srs}** (NAD83(2011) / UTM; metres).
   building cut by the edge of one set's data are joined (`lidar` names both): check these.
 - A building is decided by the square its point lies in, read with a {buildings.HALO:g} m border: one
   that reaches further out of its square than that is cut.
-- Bridges, and power-line wires over canyons and water, can come out as buildings: smooth, with no
-  ground under them. {counts.get('tall_small', 0):,} code 2 buildings (sheds, containers, RVs) stand more than 12 m
-  above the ground, which those don't: most are pieces of wire. Drop them with
-  `NOT (building = 2 AND height > 12)`. Bridges are big code 1 objects high above a river or road.
+- Bridges: decks the lidar marks as such (class {buildings.BRIDGE_DECK}) are dropped, but not every set marks
+  them. A bridge left over is a big code 1 object high above a river or road (on a steep canyon
+  wall the slope rule drops it). Power-line wires over water or a canyon, with no ground under
+  them, look like roofs; the height rule drops their pieces (a building under
+  {buildings.SMALL_STRUCTURE:g} m² is lower than {buildings.SMALL_MAX_HEIGHT:g} m).
+- Boulders in a river bed and rocks can come out as buildings, mostly code 2: smooth, with no
+  ground points under them. The slope rule drops those on steep ground, and the canyon-floor
+  rule (`ground_tpi`) the small ones on a river bed deep in a canyon. Big boulders stay: in the
+  Camp Fire run, every code 1 below -6 m that was looked at was a boulder, a tree in a ravine or
+  a bridge, so `building = 1 AND ground_tpi < -6` is worth checking by hand.
 {naip_limit}"""
     if failed:
         text += "\n**Unfinished:** " + ", ".join(t[1].stem for t in failed) + " failed 3 times; rerun to resume.\n"

@@ -5,7 +5,9 @@ _Last updated 2026-11-10 (Claude, after `cover_min`, `ROOF_PIECE`, the merge lim
 under the canopy (runs 25-27), `wall_edge` (walls step 2), moving the walls (step 3, run 28)
 the small seeds in crowns (`merge_parts`, run 29, from Michael's survey labels), and
 `detect.py` with the NAIP check (`naip_green`), the flight dates (`--before`) and the Camp Fire
-pre-fire run (`runs/camp_fire_prefire`))._
+pre-fire run (`runs/camp_fire_prefire`); 2026-11-11: bridge decks dropped, the height rule for
+small structures and `ground_slope`, notes on utility lines; 2026-11-12: `ground_tpi`, the
+canyon-floor rule for small structures, crinkly footprints become rectangles)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -25,7 +27,20 @@ building logic goes into it.
   **B4 is only partly pre-fire:** a strip through central and eastern Paradise was flown
   2018-07-07, everything west of it after the fire (2018-12-29, 2019-02-21, 2019-08-09). So
   western Paradise has no pre-fire buildings; `detect.py --before` leaves its survivors out.
-- **Offline suite: 78 passed** (10 network tests skipped), in about 25 s.
+- **False buildings in the canyons (2026-11-11, Michael's request):** three new parts of the
+  rule, checked on the Camp Fire run (see "Camp Fire run"): bridge decks (class 17) are
+  dropped; a building under 40 m² must be lower than 12 m (wire pieces); and `ground_slope`
+  (the ground 2–10 m around) must be under 35°, or 25° under 40 m² (rocks, cliffs, road fills).
+  2026-11-12 (Michael chose the canyon-floor option): `ground_tpi`, the ground around an
+  object minus the ground 20–50 m from its point; a building under 40 m² must have it above
+  −8 m (boulders on river beds). `runs/camp_fire_prefire` is still from the old code: the
+  rerun (about 3 h) goes to `runs2/camp_fire_prefire`, and the old run stays for comparison. Notes on how power lines show up, for later:
+  `utility_lines_notes.md`.
+- **Crinkly footprints become rectangles (2026-11-12, Michael's request):** a last,
+  geometry-only step (`square_up`, `outline` 6; see "`outline` codes" under Building
+  detection). In the Camp Fire run 70% of the buildings weren't straightened (small, or
+  tree-bitten); about 19,600 would change. Not in `runs/camp_fire_prefire` (the rerun: `runs2/`).
+- **Offline suite: 83 passed** (10 network tests skipped), in about 25 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA). `camp_lidar_memo.md` lists the
@@ -154,7 +169,8 @@ under a building the ground is filled in from around it.
     $P src/tilestream.py merge out/
 
 - **Rasters** (0.5 m):
-  - `dtm`, `dsm` and `ndsm`;
+  - `dtm`, `dsm` and `ndsm` (the dsm without noise, 7 and 18, and bridge decks, 17:
+    `BRIDGE_DECK`, added 2026-11-11);
   - `ground_gap`: the distance to the nearest ground point; roofs leave holes with
     straight edges;
   - `multi_return`: the share of split pulses;
@@ -192,6 +208,15 @@ under a building the ground is filled in from around it.
   - `area`, `height`, `hole_depth`, `hole_share`, `rectangularity`, `multi_return`;
   - `roughness`, and `roughness_inside` (the same without the edge pixels: on a small
     object, half the pixels are edge, where the Laplacian sees the drop to the ground);
+  - `ground_slope` (`ring_median()` of the slope, added 2026-11-11): the median slope
+    (degrees) of the dtm, smoothed over 1 m, in a ring 2–10 m around the object
+    (`GROUND_RING`). Under a roof the dtm is only filled in, so the ring outside says what
+    the ground is;
+  - `ground_tpi` (`ground_tpi()`, added 2026-11-12): the topographic position index, m: the
+    median dtm in that ring minus the median dtm 20–50 m from the object's point (`TPI_RING`,
+    sampled every 2.5 m, `TPI_STEP`). Negative: the object lies low (a canyon's floor). 50 m
+    fits in the halo, so every window gives the same value (checked on Chewelah: four
+    squares and one window equal);
   - with `POINT_METRICS = True`, metrics from the object's points:
     - `n_points`;
     - `top`, `h_mean`, `h_std`, `h_p50`, `h_p95`: the returns above 2 m;
@@ -232,7 +257,23 @@ under a building the ground is filled in from around it.
 - **`outline` codes** (the safety net): 0 straightened; not straightened because 1 too small
   (< 25 m², pixel outline), 2 the walls don't agree (`agree` < 0.7: ragged, mostly
   tree-bitten), 3 the result wasn't a valid shape, 4 the area changed more than 10%,
-  5 not a building. Codes 2–5 get the simplified outline.
+  5 not a building. Codes 2–5 get the simplified outline. 6 (added 2026-11-12): the main
+  rectangle, the last step for buildings (`square_up`, `main_rectangle`, Michael's idea):
+  a part with more than 0.3 corners per m of outline (`SQUARE_CORNERS`; straightened
+  outlines have 0.11–0.26, simplified 0.3–0.57, pixel outlines 1.0–1.5) becomes the
+  rectangle along its main direction over the columns and rows that cover at least half
+  their median (`SQUARE_COVER`, on a 0.25 m grid, the ends interpolated), if it overlaps the
+  part at least 0.5 IoU (`SQUARE_MIN_IOU`). Code 6 only when the footprint's biggest part
+  changed: the code tells how the main shape was made, so a sliver beside a straightened
+  house becomes a rectangle but the house keeps its 0. Camp Fire, run afterwards on its
+  footprints (`square_real.py`, `square_count.py`; pictures `square_*.png` in the scratchpad,
+  linked as `tmp_symlinks/square_tpi/crinkle_*`): 19,622 of 28,513 change, 19,321 get code 6
+  (of the 543 straightened ones that change, 225 only in a small extra part), area +8%
+  (pixel outlines) to +11% (tree-bitten; bites filled) at the median. Chewelah: 52 of 189
+  change, 50 get code 6; the same in four squares and one window. An L or T that isn't
+  crinkly stays: n corners are crinkly only on an outline shorter than n / 0.3 m (an L under
+  20 m, a T under 27 m); none of the changed Camp Fire parts had 6 corners. theoretical_basis.md
+  section 7b.
 - **`review`, `tree_notch()`:** 1 if a diagonal wall (unsnapped, ≥ 4 m) has mostly tree
   pixels just in front of it: a tree hangs over the roof and hides part of it. In front of a
   real wall is ground or another building. Checked against the DSM by Michael: it does "a
@@ -280,7 +321,15 @@ under a building the ground is filled in from around it.
     bushes don't);
   - area ≥ 4 m²;
   - `cover_min` not below 0.2 (`VEHICLE_COVER`, the vehicle guard, added 2026-11-09). NaN,
-    or no `cover_min` column, passes: it means no evidence.
+    or no `cover_min` column, passes: it means no evidence;
+  - under 40 m²: `height` below 12 m (`SMALL_MAX_HEIGHT`, added 2026-11-11: no shed is that
+    high; in the Camp Fire run those were wire pieces over water, bridges, bits of crowns);
+  - `ground_slope` below 35° (`BUILDING_MAX_SLOPE`), below 25° under 40 m²
+    (`SMALL_MAX_SLOPE`; added 2026-11-11). NaN (no ground), or no column, passes. The
+    evidence (samples over NAIP) is in theoretical_basis.md section 4;
+  - under 40 m²: `ground_tpi` above −8 m (`SMALL_MIN_TPI`, added 2026-11-12: lower were
+    boulders on river beds and trees in ravines). Big ones aren't judged by it (real houses
+    down to −5.6 m). NaN, or no column, passes. Evidence in theoretical_basis.md section 4.
 - **`building` codes:** 0 = not a building, 1 = building, 2 = shed, container or RV (a
   building under 40 m²).
 - **Test sites** (EPSG:6340, 500 m):
@@ -537,6 +586,33 @@ automatic result, a test case to refine later. Everything is in `runs/camp_fire_
   reservoir at 628800, 4393050, 72-83 m above the water; 74 are above 20 m). The README gives
   the count and a filter (`NOT (building = 2 AND height > 12)`); no rule in the code yet. A
   rule could use height for code 2 and the wire class or water under an object.
+- **Rules against them (2026-11-11, in the code; this run's outputs are from before them):**
+  - What the lidar says: PlumasNF B2 marks bridge decks as class 17 (the Pulga bridge: 2,678
+    deck points; two more bridges 40–60 m up, at 625793, 4391470 and 632524, 4406111). The
+    wires over the reservoir are class 1 (52 of 61 points in a 30 m box; the water returns
+    almost nothing). B2 marks big rivers as water (class 9), not the small creeks.
+  - `BRIDGE_DECK`, `SMALL_MAX_HEIGHT` and `ground_slope` (see Building detection). Samples
+    over NAIP (`terrain.py`, `suspect_pics.py` in the scratchpad; pictures `sus_*.png`): on
+    steep ground the "buildings" were rocks, cliffs, road fills, highway bridges and a gully;
+    all small objects 12–20 m up were bits of crowns, bridges or wire.
+  - **Check rerun** of 10 squares (scratchpad `fix_check`, `compare_fix.py`): 429 → 348
+    buildings. Gone: all 50 wire pieces, about 30 bridge pieces, a few rocks and a gully;
+    no real building lost (central Paradise 229 → 229; the houses on 25–30° ground stay).
+  - **Boulders on flat river beds** (the slope rule doesn't catch them; since 2026-11-12 the
+    canyon-floor rule, `ground_tpi`, drops the small ones). The Feather River and Butte Creek canyons
+    hold many big granite boulders: smooth, no ground under them, on flat ground. Of 18
+    random code 1 objects at the bottom of a canyon (ground 10 m below the ground 30–75 m
+    around), 17 were boulders and 1 a house (fid 61776, with a pool, by a road); of 24 such
+    objects of either code, 23 boulders. Class 9 water lies within 8 m of 6 of 8 boulders,
+    none of 8 houses, but small creeks have no class 9 (622000, 4408500: none). Their shape
+    (rectangularity 0.52–0.67) overlaps the town's sheds (0.55–0.81).
+  - **`ground_tpi` on this run** (2026-11-12; scratchpad `tpi_run.py` computes it from
+    `dtm.vrt` and the footprints, `tpi_*.png` the pictures): of the small objects the slope
+    and height rules leave, 197 lie below −7.5 m, and 0 of 30 looked at were buildings; from
+    −7.5 to −5 m 1–3 of 36 were (a trailer at −7.5); higher up more. At −8 m the rule drops
+    173. All 51 big ones below −5 m looked at: 48 false (boulders, trees in ravines, road
+    bridges), 3 real buildings at −5.0 to −5.6 (fids 33431, 40730, 52906); below −6 m all 38
+    false. The house of the earlier try (fid 61776) is at −4.0 with 20–50 m.
 - **Checked:** the dates; the counts add up; a central Paradise box flags the same buildings
   as the earlier test; pictures over NAIP in central and east Paradise, of the reservoir and
   the bridge. **Not checked:** buildings one by one, the other code 2 objects in the forest
@@ -625,7 +701,8 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `runs/` (git-ignored): detect.py runs. `runs/camp_fire_prefire/`: the Camp Fire pre-fire
   buildings (`buildings.gpkg`), with `README.md`, `inputs/` (the perimeter, the NAIP tile list),
   `code/` (the code the squares ran with), `flown/` and `flown.gpkg` (the flight dates) and
-  `share/camp_fire_prefire.zip` (what to pass on).
+  `share/camp_fire_prefire.zip` (what to pass on). `runs2/` (git-ignored): the rerun with
+  the rules of 2026-11-11 and 11-12, `runs/` kept for comparison.
 - `tmp_symlinks/camp_fire_inputs/` (git-ignored): the perimeter as downloaded, NAIP 2018
   (`naip_2018/`, 35 tiles as they are, `tiles.json`, `naip_2018.vrt`), the STAC search results.
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
@@ -636,6 +713,8 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `.github/workflows/network-tests.yml`: CI, the network tests on every push.
 - `downloadlist_WA_NorthEast_2_B22.txt`: the original USGS list. Optional now; use it with `--list`.
 - `camp_lidar_memo.md`: Michael's notes on the Camp Fire lidar (datasets, EPT links, caveats).
+- `utility_lines_notes.md`: how power lines show up in the lidar, and how we might find them
+  someday (2026-11-11; nothing built).
 - `theoretical_basis.md`: how each step works and why (with mermaid diagrams); keep it in step with the code.
   A web page made from it (one self-contained HTML file, kept by hand in step with the .md) is
   published privately on claude.ai: https://claude.ai/artifact/A479foxZU67XFnEWae5gKx (last
@@ -653,8 +732,22 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
    - **NAIP alignment:** before counting green, shift NAIP per block (e.g. 250 m) to where
      its NDVI best matches the lidar's crowns (nDSM), so tall trees no longer lean onto
      roofs. Measured: 3 m in east Paradise (see "Camp Fire run").
-   - **Bridges and wires:** a rule against them (see "Camp Fire run"), e.g. a height limit for
-     code 2 and a look at the classes under an object (water, wire).
+   - **Bridges and wires: done 2026-11-11** (class 17, the 12 m limit for small structures,
+     `ground_slope`). Rerun the Camp Fire squares to apply them (about 3 h; the dates and
+     NAIP steps rerun quickly after).
+   - **Boulders in river beds: the small ones done 2026-11-12** (`ground_tpi`, option (a) of
+     the four we weighed). Left: big boulders (code 1; the README suggests checking code 1
+     below −6 m by hand, or a review code could mark them), and small ones on wide or
+     shallow river beds. If that matters: (b) water (class 9) next to the object (only the big
+     rivers have it), (c) a stream map (the USGS National Hydrography Dataset, or flow
+     accumulation on the dtm as a pre-pass in detect.py).
+   - **Utility lines** someday: `utility_lines_notes.md`.
+   - **Main rectangles (`square_up`), to tune with Michael:** an L, T or complex building with
+     a crinkly outline becomes one rectangle, and the rectangle keeps the pixel outline's bias
+     (its walls aren't moved onto the roof's edge). Ideas if that matters: a second rectangle
+     for what the first leaves out (an L as two), or `refine_walls` on the rectangle. The
+     knobs: `SQUARE_CORNERS` (which outlines), `SQUARE_COVER` (how much a bite or a bit sticking
+     out may be), `SQUARE_MIN_IOU` (the guard).
 2. Later for buildings:
    - **NAIP as a review column: done 2026-11-10 as `naip_green` / `naip_flag`** (see Building
      detection; detect.py `--naip`). The plan it came from (agreed with Michael 2026-11-09), e.g. `green_share`: the

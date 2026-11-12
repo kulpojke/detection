@@ -5,9 +5,10 @@ objects (buildings and tree crowns) with the features a building rule will use.
 Rasters on a 0.5 m grid:
   dtm           ground height: mean of the ground points (class 2) in each pixel; pixels
                 without ground points get the height of the nearest pixel that has them
-  dsm           top height: highest point in each pixel (noise dropped). The scan pattern
-                leaves ~2% of pixels empty by chance; those get the height of the nearest
-                pixel with a point if it is within DSM_FILL. Bigger holes (water, dropouts) stay NaN.
+  dsm           top height: highest point in each pixel (noise and bridge decks dropped). The
+                scan pattern leaves ~2% of pixels empty by chance; those get the height of the
+                nearest pixel with a point if it is within DSM_FILL. Bigger holes (water,
+                dropouts) stay NaN.
   ndsm          height above ground, dsm - dtm
   ground_gap    distance (m) to the nearest pixel with a ground point: 0 where the ground was
                 measured, growing toward the middle of a hole. A roof stops every pulse, so a
@@ -49,6 +50,9 @@ point keeps the row. Columns:
   (1 for a rectangle, lower for ragged shapes), multi_return (share of split pulses),
   roughness (median), roughness_inside (median without the object's edge pixels: at the edge
   the Laplacian sees the drop to the ground, and on a small object half the pixels are edge),
+  ground_slope (degrees: the median slope of the dtm 2-10 m around the object, GROUND_RING),
+  ground_tpi (m: how far that ground lies above the ground 20-50 m from the object's point,
+  TPI_RING; negative: it lies low, as on a canyon's floor),
   building (the rule's verdict, CODES: 0 = not a building, 1 = building, 2 = shed, container
   or RV, a building under SMALL_STRUCTURE), and with POINT_METRICS the metrics from the
   object's points: n_points, top, h_mean, h_std, h_p50, h_p95, cover, i_mean, i_std (see
@@ -67,6 +71,9 @@ Layer "footprints" (GeoPackage): the roof-seeded objects as polygons, with the s
            (not under SIMPLIFY_MIN_AREA). Then the roof's own first returns move the straight
            walls to the roof's edge (refine_walls, move_wall, wall_edge): a pixel outline lies a
            little outside the roof, since a pixel is roof if any of its pulses hits the roof.
+           Last, a building's parts that are still crinkly (more than SQUARE_CORNERS corners per m
+           of outline: pixel outlines, tree-bitten ones) become their main rectangle (square_up),
+           from the geometry only; code 6 if that happened to the biggest part.
   review   1 for a tree notch (tree_notch): a diagonal wall with tree in front of it, where a
            tree hangs over the roof and hides part of it (and roof_under_canopy didn't find it).
   under_canopy  m^2 of roof found under trees (in the polygon; area and the rule's features are
@@ -97,7 +104,7 @@ PointSourceId for POINT_METRICS (tilestream reads all fields unless --dims says 
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import ConvexHull, cKDTree
-from skimage import measure
+from skimage import draw, measure
 from skimage.segmentation import watershed
 
 from tilestream import Raster
@@ -137,6 +144,13 @@ MAX_SHIFT = 1.5         # m: a diagonal wall that would meet its neighbour furth
 STRAIGHT_MIN_AREA = 25  # m^2: a smaller ring (building, part or hole) keeps its pixel outline: walls too short
 STRAIGHT_AGREE = 0.7    # the walls must agree at least this well on one direction (tree-bitten outlines don't)
 STRAIGHT_MAX_CHANGE = 0.1  # the straightened area may differ at most this share from the pixel area
+SQUARE_CORNERS = 0.3    # corners per m of outline (square_up, the last step): a footprint part with more is crinkly
+                        # (Camp Fire: straightened outlines 0.11-0.26, simplified ones 0.39-0.57, pixel outlines
+                        # 1.0-1.5) and becomes its main rectangle (main_rectangle): along its main direction, from
+SQUARE_COVER = 0.5      # where it covers at least this share of its median width to where it stops, and across the
+SQUARE_FINE = 0.25      # same, measured on a grid this fine (m). Only if the rectangle and the part overlap at
+SQUARE_MIN_IOU = 0.5    # least this much (intersection / union): less were mostly crowns, rocks and two buildings
+                        # in one part
 EDGE_SLICE = 0.5        # m (wall_edge, where the roof's own points put a wall): slices this wide along the wall,
 EDGE_END = 0.5          # leaving out this much at each end (the corners)
 EDGE_FIT = (0.25, 1.5)  # m inside the wall: the roof next to it is fitted to the high first returns there,
@@ -157,6 +171,17 @@ BUILDING_AREA = 4.0     # and an area of at least this (m^2; a 2 x 3 m shed is 6
 VEHICLE_COVER = 0.2     # and no cover_min below this: one flight line saw the ground there, so it came or went
                         # between passes (Chewelah: 0.00 for 5 vehicles that moved, >= 0.29 for every other object)
 SMALL_STRUCTURE = 40    # m^2: a smaller building is a shed, container or RV (40 ft container 30 m^2, big RV 35)
+SMALL_MAX_HEIGHT = 12   # m: and the rule: a building smaller than SMALL_STRUCTURE is lower than this (height).
+                        # Camp Fire: 106 of 10,709 were higher; all 12-20 m ones looked at were bits of crowns,
+                        # bridges and wires (and 49 pieces of wire 71-83 m over water)
+BUILDING_MAX_SLOPE = 35  # degrees: and the ground around a building (ground_slope) is less steep than this,
+SMALL_MAX_SLOPE = 25    # under SMALL_STRUCTURE less steep than this. Camp Fire, looked at over NAIP: over 35
+                        # degrees 0 of 24 were buildings (rocks, cliffs, road fills and bridges), small ones over 25
+                        # degrees 0 of 36; at 20-30 degrees 7 of 24 bigger ones were houses
+SMALL_MIN_TPI = -8.0    # m: and a small one's ground_tpi is above this: lower lie the floors of canyons, with
+                        # their boulders. Camp Fire, over NAIP: of the small ones below -7.5 m 0 of 30 were
+                        # buildings (boulders on river beds, trees in ravines), from -7.5 to -5 m 1-3 of 36 (a
+                        # trailer at -7.5). Bigger ones aren't judged by it: real houses down to -5.6 m
 CANOPY_REACH = 2.0      # m (roof_under_canopy): a building's roof is looked for under trees up to this far
                         # from its visible roof,
 CANOPY_FIT = 1.5        # m: on the roof surface continued under the tree: a plane fitted to the dsm of the
@@ -172,7 +197,8 @@ CODES = {"footprints": {"building": {0: "not a building", 1: "building", 2: "she
                                     2: "not straightened: walls don't agree on a direction",
                                     3: "not straightened: the result was not a valid shape",
                                     4: "not straightened: the area changed too much",
-                                    5: "not straightened: not a building"},
+                                    5: "not straightened: not a building",
+                                    6: "main rectangle: the outline was crinkly"},
                         "review": {0: "no", 1: "tree notch: a tree may hide part of the roof"}}}
 POINT_METRICS = True    # per-object metrics from the points (heights, cover, intensity; see
                         # point_metrics, and cover_min). Needs the Intensity and PointSourceId fields.
@@ -182,14 +208,23 @@ CROWN_MIN_AREA = 5.0    # m^2: smaller tree objects are mostly loose bits just o
                         # snags): in Nine Mile Falls 44% of the tree objects, but 1% of their area
 GROUND = 2
 NOISE = (7, 18)         # low and high noise
+BRIDGE_DECK = 17        # the USGS lidar specification asks for bridge decks in this class (PlumasNF B2 has them:
+                        # the Pulga bridge). A deck is smooth, high and hides the ground like a roof, so it goes
+                        # like noise: the dsm shows what is under it. Sets without the class keep their bridges
 NAIP_GREEN_NDVI = 0.25  # a NAIP pixel is green above this NDVI (Chewelah 2023, Michael's labels: trees from
                         # 0.29, roof parts up to 0.21)
 NAIP_EDGE = 1.0         # m: naip_green counts only roof pixels at least this far from anything that isn't
                         # roof. NAIP shows tall things shifted (in Chewelah 1-3 m), so a crown beside a roof
                         # spills its green onto the roof's edge
 NAIP_FLAG_M2 = 4.0      # m^2 of green on a footprint's roof that set naip_flag
+SLOPE_SMOOTH = 1.0      # m (ground_slope): the dtm is smoothed this much (Gaussian sigma) before its slope is taken,
+GROUND_RING = (2.0, 10.0)  # m: the slope (and the ground of ground_tpi) is read this far around an object: the
+                        # ground it stands on (under a roof the dtm is only filled in from around it)
+TPI_RING = (20.0, 50.0)  # m (ground_tpi): that ground is compared with the ground this far from the object's
+                        # point (within HALO: the point is in the core),
+TPI_STEP = 5            # pixels: sampled this often (2.5 m; ~1,000 heights, plenty for a median, and fast)
 FEATURES = ("area", "height", "hole_depth", "hole_share", "rectangularity", "multi_return", "roughness",
-            "roughness_inside")
+            "roughness_inside", "ground_slope", "ground_tpi")
 
 
 def analyze(pts, w):
@@ -201,7 +236,7 @@ def analyze(pts, w):
 
     ground = pts["Classification"] == GROUND
     dtm, ground_gap = fill_from_nearest(mean_per_pixel(pixel[ground], pts["Z"][ground], ny, nx))
-    keep = ~np.isin(pts["Classification"], NOISE)
+    keep = ~np.isin(pts["Classification"], NOISE + (BRIDGE_DECK,))
     dsm, dsm_gap = fill_from_nearest(highest_per_pixel(pixel[keep], pts["Z"][keep], ny, nx))
     dsm[dsm_gap > DSM_FILL] = np.nan
     ndsm = dsm - dtm
@@ -215,10 +250,12 @@ def analyze(pts, w):
         multi_return = (ndimage.correlate(split, box, mode="constant") /
                         ndimage.correlate(pulses, box, mode="constant")).astype(np.float32)
     roughness = np.abs(ndimage.laplace(dsm))
+    gy, gx = np.gradient(ndimage.gaussian_filter(dtm, SLOPE_SMOOTH / RES), RES)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))  # of the ground, for ground_slope
 
     layers = {"dtm": dtm, "dsm": dsm, "ndsm": ndsm, "ground_gap": ground_gap,
               "multi_return": multi_return, "roughness": roughness}
-    grids = {**layers, "pulses": pulses, "split": split}  # what describe() reads
+    grids = {**layers, "pulses": pulses, "split": split, "slope": slope}  # what describe() and objects_table() read
     segments, n_roofs = segment(grids)
 
     out = {name: Raster(r, x0, ytop, RES, nodata=np.nan) for name, r in layers.items()}
@@ -267,6 +304,12 @@ def analyze(pts, w):
             geom.Normalize()
             shapes[i] = geom
         review[j] = tree_notch(traced[i], i, with_under, n_roofs, x0, ytop) > 0
+        square, squared, main = square_up(shapes[i])  # the last step: crinkly parts become rectangles
+        if squared:
+            square.Normalize()
+            shapes[i] = square
+        if main:  # the code tells how the main shape was made, not a small part beside it
+            outline[j] = 6
 
     def layer(rows, drop, **extra):  # the table's rows, without a column that is the same in every row
         return {**{k: v[rows] for k, v in t.items() if k != drop}, **{k: v[rows] for k, v in extra.items()},
@@ -460,7 +503,8 @@ def objects_table(segments, n_roofs, g, x0, ytop):
         # a point inside the object: a roof's pixel furthest from any ground point, a tree's top
         k = np.argmax(g["ground_gap"][r, c] if roof else g["ndsm"][r, c])
         rows.append({"x": x0 + (c[k] + 0.5) * RES, "y": ytop - (r[k] + 0.5) * RES, "roof_seed": float(roof),
-                     **describe(r, c, g)})
+                     **describe(r, c, g), "ground_slope": ring_median(r, c, g["slope"]),
+                     "ground_tpi": ground_tpi(r, c, k, g["dtm"])})
         labels.append(i)
     columns = ("x", "y", "roof_seed") + FEATURES
     return {k: np.array([row[k] for row in rows], dtype=float) for k in columns}, np.array(labels, int)
@@ -479,11 +523,23 @@ def is_building(t):
     The vehicle guard: an object below VEHICLE_COVER in cover_min wasn't there in one flight line.
     It is insurance: a vehicle that moved leaves no covered hole (another line saw the ground under
     it), so in Chewelah none got a roof seed. Without cover_min (no POINT_METRICS) or with NaN (no
-    line counts) there is no evidence, and the object passes."""
+    line counts) there is no evidence, and the object passes.
+    A small structure (under SMALL_STRUCTURE) must be lower than SMALL_MAX_HEIGHT: a shed isn't 12 m
+    high. Small smooth objects that high were bits of crowns, bridges and wires.
+    The ground: a building stands on ground less steep than BUILDING_MAX_SLOPE (ground_slope), a small
+    one less steep than SMALL_MAX_SLOPE. On steeper ground the smooth objects were rocks, cliffs, and
+    road fills and bridges. And a small one doesn't stand on a canyon's floor: its ground_tpi is above
+    SMALL_MIN_TPI. There the smooth objects with no ground under them were boulders on the river bed.
+    Without ground_slope or ground_tpi (or NaN: no ground) there is no evidence: it passes."""
+    small = t["area"] < SMALL_STRUCTURE
     rough_max = np.where(t["area"] < BUILDING_SMALL, BUILDING_ROUGH_SMALL, BUILDING_ROUGH)
     moved = np.asarray(t.get("cover_min", np.nan)) < VEHICLE_COVER  # NaN < x is False: passes
+    tall_small = small & (t["height"] >= SMALL_MAX_HEIGHT)
+    steep = np.asarray(t.get("ground_slope", np.nan)) >= np.where(small, SMALL_MAX_SLOPE, BUILDING_MAX_SLOPE)
+    low_small = small & (np.asarray(t.get("ground_tpi", np.nan)) <= SMALL_MIN_TPI)  # NaN <= x is False: passes
     return ((t["roof_seed"] == 1) & (t["multi_return"] < BUILDING_MULTI)
-            & (t["roughness_inside"] < rough_max) & (t["area"] >= BUILDING_AREA) & ~moved)
+            & (t["roughness_inside"] < rough_max) & (t["area"] >= BUILDING_AREA) & ~moved & ~tall_small
+            & ~steep & ~low_small)
 
 
 def point_metrics(h, first, intensity, label, rows):
@@ -650,7 +706,8 @@ def fit_plane(segments, dsm, row, col):
 
 
 def describe(r, c, g):
-    """The FEATURES of one object, from its pixel rows and columns and the grids ``g``."""
+    """The FEATURES of one object but the ground's (ground_slope, ground_tpi), from its pixel rows and
+    columns and the grids ``g``."""
     gap = g["ground_gap"][r, c]
     n_pulses = g["pulses"][r, c].sum()
     # the pixels whose 4 neighbours are in the object too: the Laplacian there doesn't see the drop at the edge
@@ -665,6 +722,37 @@ def describe(r, c, g):
             "multi_return": g["split"][r, c].sum() / n_pulses if n_pulses else np.nan,
             "roughness": np.nanmedian(g["roughness"][r, c]),
             "roughness_inside": np.nanmedian(g["roughness"][r[inside], c[inside]]) if inside.any() else np.nan}
+
+
+def ring_median(r, c, grid):
+    """The median of a grid (the ground's slope or height) in the ring GROUND_RING around an object (its
+    pixel rows and columns): of the ground it stands on. NaN if the ring is empty or all NaN (no ground)."""
+    near, far = GROUND_RING
+    m = int(np.ceil(far / RES))
+    r0, c0 = max(r.min() - m, 0), max(c.min() - m, 0)
+    r1, c1 = min(r.max() + m + 1, grid.shape[0]), min(c.max() + m + 1, grid.shape[1])
+    outside = np.ones((r1 - r0, c1 - c0), bool)
+    outside[r - r0, c - c0] = False
+    d = ndimage.distance_transform_edt(outside, sampling=RES)  # m to the object
+    ring = grid[r0:r1, c0:c1][(d > near) & (d <= far)]
+    return np.nanmedian(ring) if np.isfinite(ring).any() else np.nan
+
+
+def ground_tpi(r, c, k, dtm):
+    """The topographic position index of an object (its pixel rows and columns; k: its point): how far
+    (m) the ground it stands on (ring_median of the dtm) lies above the ground TPI_RING from its point
+    (their median, every TPI_STEP pixels from the point). Negative: it lies low, as on a canyon's floor,
+    where the ground rises on both sides. NaN without ground."""
+    near, far = TPI_RING
+    m = int(far / RES) // TPI_STEP * TPI_STEP
+    dy, dx = np.mgrid[-m:m + 1:TPI_STEP, -m:m + 1:TPI_STEP]
+    d = np.hypot(dy, dx) * RES
+    y, x = r[k] + dy, c[k] + dx
+    use = (d > near) & (d <= far) & (y >= 0) & (y < dtm.shape[0]) & (x >= 0) & (x < dtm.shape[1])
+    around = dtm[y[use], x[use]]
+    if not np.isfinite(around).any():
+        return np.nan
+    return ring_median(r, c, dtm) - np.nanmedian(around)
 
 
 def trace(labels, x0, ytop):
@@ -939,6 +1027,64 @@ def refine_walls(geom, shift):
         return geom, 0, np.nan
     result = from_rings(polys)
     return (result, len(moved), float(np.median(moved))) if result.IsValid() else None
+
+
+def square_up(geom):
+    """A footprint with its crinkly parts (more than SQUARE_CORNERS corners per m of outline) as their
+    main rectangle (main_rectangle), if it overlaps the part at least SQUARE_MIN_IOU: (geometry,
+    whether any part changed, whether the biggest part changed). Geometry only: a pixel outline, or
+    one bitten by trees, becomes the rectangle it mostly is. The other parts stay as they are."""
+    parts, areas, squared = [], [], []
+    for rings in polygon_rings(geom):
+        part = from_rings([rings])
+        areas.append(part.GetArea())
+        squared.append(False)
+        if sum(len(r) - 1 for r in rings) > SQUARE_CORNERS * part.Boundary().Length():
+            box = main_rectangle(rings)
+            if box is not None and part.Intersection(box).GetArea() >= SQUARE_MIN_IOU * part.Union(box).GetArea():
+                part, squared[-1] = box, True
+        parts.append(part)
+    out = parts[0]
+    for part in parts[1:]:  # rectangles of two parts can overlap
+        out = out.Union(part)
+    return out, any(squared), squared[int(np.argmax(areas))]
+
+
+def main_rectangle(rings):
+    """The main rectangle of one polygon (its rings: polygon_rings), or None if it is too small to
+    measure. Turned onto its main direction (main_direction_of its walls), the polygon is filled on a
+    grid of SQUARE_FINE: along it, the rectangle runs over the columns the polygon covers to at least
+    SQUARE_COVER of the median column (cover_ends), and across it the same way by rows. So a narrow
+    bit sticking out (a tree's edge) is cut off and a shallow bite (a tree over the roof) filled."""
+    main = main_direction_of([w for r in rings for w in wall_pieces(r)])[0]
+    t = np.radians(main)
+    along, across = np.array([np.cos(t), np.sin(t)]), np.array([-np.sin(t), np.cos(t)])
+    pts = np.concatenate(rings)
+    u0, v0 = (pts @ along).min(), (pts @ across).min()
+    shape = (int(np.ptp(pts @ across) / SQUARE_FINE) + 1, int(np.ptp(pts @ along) / SQUARE_FINE) + 1)
+    inside = np.zeros(shape, bool)
+    for k, r in enumerate(rings):  # the outer ring, then its holes; a cell is in if its middle is
+        rr, cc = draw.polygon((r @ across - v0) / SQUARE_FINE - 0.5, (r @ along - u0) / SQUARE_FINE - 0.5, shape)
+        inside[rr, cc] = k == 0
+    if not inside.any():
+        return None
+    (a0, a1), (c0, c1) = cover_ends(inside.sum(axis=0)), cover_ends(inside.sum(axis=1))  # columns, rows
+    corners = [(a0, c0), (a1, c0), (a1, c1), (a0, c1), (a0, c0)]
+    return from_rings([[np.array([(u0 + a) * along + (v0 + c) * across for a, c in corners])]])
+
+
+def cover_ends(cover):
+    """Where (m from the grid's start) a polygon's cover per column (cells; main_rectangle) starts and
+    stops reaching SQUARE_COVER of its median: at each end between the column centres of the last one
+    that does and the next, where the cover crosses that level (linearly). So a pixel staircase gives
+    its middle, not a cell too much: the cover falls from full to none across it."""
+    level = SQUARE_COVER * np.median(cover[cover > 0])
+    keep = np.flatnonzero(cover >= level)
+    ends = []
+    for k, step in ((keep[0], -1), (keep[-1], 1)):
+        beyond = cover[k + step] if 0 <= k + step < len(cover) else 0  # < level
+        ends.append((k + 0.5 + step * (cover[k] - level) / (cover[k] - beyond)) * SQUARE_FINE)
+    return ends
 
 
 def move_wall(p0, p1, out, main, first, segments, n_roofs, neighbours, x0, ytop):

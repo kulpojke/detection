@@ -384,17 +384,65 @@ def test_is_building():
         "roof_seed":        [1,    1,    1,     1,    1,    1,         0,           1,       1],
         "area":             [183,  7.5,  12.8,  8.8,  16,   180,       50,          3.5,     10],
         "multi_return":     [0.08, 0.18, 0.55,  0.27, 0.23, 0.18,      0.1,         0.08,    np.nan],
-        "roughness_inside": [0.12, 0.05, 2.43,  0.61, 0.36, 0.40,      0.1,         0.05,    0.1]}.items()}
+        "roughness_inside": [0.12, 0.05, 2.43,  0.61, 0.36, 0.40,      0.1,         0.05,    0.1],
+        "height":           [5.5,  2.6,  9.8,   2.1,  2.5,  7.0,       12.0,        2.5,     3.0]}.items()}
     # the bush is too rough inside for a small object; the big house, as rough, has a complex roof
     assert buildings.is_building(t).tolist() == [True, True, False, False, False, True, False, False, False]
     assert buildings.is_building({k: v[1] for k, v in t.items()})  # one row works too
     # the building column: the shed is a small structure, the houses are buildings
     assert buildings.building_code(t).tolist() == [1, 2, 0, 0, 0, 1, 0, 0, 0]
+    # a small structure isn't 12 m high (a piece of wire or bridge); a big building can be
+    high = {k: v[[1, 1, 0]] for k, v in t.items()}
+    high["height"] = np.array([11.9, 12.0, 14.0])
+    assert buildings.is_building(high).tolist() == [True, False, True]
+    # the ground: a building on ground steeper than 35 degrees, a small one steeper than 25, is a
+    # rock, a cliff or a road fill; NaN (no ground) is no evidence
+    steep = {k: v[[0, 0, 1, 1, 1]] for k, v in t.items()}
+    steep["ground_slope"] = np.array([34.9, 35.0, 24.9, 25.0, np.nan])
+    assert buildings.is_building(steep).tolist() == [True, False, True, False, True]
+    # a small one 8 m below the ground 20-50 m around is a boulder on a canyon's floor; a big one
+    # isn't judged by it (a house can stand in a valley); NaN is no evidence
+    low = {k: v[[1, 1, 0, 1]] for k, v in t.items()}
+    low["ground_tpi"] = np.array([-7.9, -8.0, -20.0, np.nan])
+    assert buildings.is_building(low).tolist() == [True, False, True, True]
     # the vehicle guard: a box like the shed that one flight line saw through (cover_min 0) came
     # or went between passes; the real shed has 0.63, and NaN (no line counts) is no evidence
     box = {k: v[[1, 1, 1]] for k, v in t.items()}
     box["cover_min"] = np.array([0.0, 0.63, np.nan])
     assert buildings.is_building(box).tolist() == [False, True, True]
+
+
+def test_ring_median():
+    """ring_median (ground_slope) reads the ring 2-10 m around the object: not the object (under a
+    roof the dtm is filled in), not the 2 m next to it, not beyond 10 m; also at the grid's edge."""
+    from scipy import ndimage
+    for r0 in (40, 0):  # in the middle, at the top edge
+        obj = np.zeros((100, 100), bool)
+        obj[r0:r0 + 10, 45:55] = True  # 5 x 5 m
+        d = ndimage.distance_transform_edt(~obj, sampling=buildings.RES)
+        slope = np.where((d > 2) & (d <= 10), 30.0, 0.0)
+        r, c = np.nonzero(obj)
+        assert buildings.ring_median(r, c, slope) == 30
+    assert np.isnan(buildings.ring_median(r, c, np.full((100, 100), np.nan)))
+
+
+def test_ground_tpi():
+    """ground_tpi: the ground 2-10 m around the object against the ground 20-50 m from its point. A
+    canyon: the floor at 100 m out to 15 m from the point, the walls at 120 m from 20 m: -20. Between
+    15 and 20 m (a slope) it counts in neither. Also with the grid cut off at the point (the median
+    of what is there), on flat ground (0), and without ground (NaN)."""
+    yy, xx = np.mgrid[0:240, 0:240]
+    d = np.hypot(yy - 120, xx - 120) * buildings.RES  # m from the point, pixel (120, 120)
+    dtm = np.where(d <= 15, 100.0, np.where(d > 20, 120.0, np.nan))
+    obj = (abs(yy - 120) < 5) & (abs(xx - 120) < 5)  # 4.5 x 4.5 m around the point
+    r, c = np.nonzero(obj)
+    k = np.flatnonzero((r == 120) & (c == 120))[0]
+    assert buildings.ground_tpi(r, c, k, dtm) == -20
+    assert buildings.ground_tpi(r, c - 115, k, dtm[:, 115:]) == -20  # the grid starts 2.5 m left of the point
+    assert buildings.ground_tpi(r, c, k, np.full_like(dtm, 7.0)) == 0
+    assert np.isnan(buildings.ground_tpi(r, c, k, np.full_like(dtm, np.nan)))
+    # ground only within 20 m of the point and beyond 50 m: none 20-50 m away, so no evidence
+    assert np.isnan(buildings.ground_tpi(r, c, k, np.where((d < 20) | (d > 50.5), 100.0, np.nan)))
 
 
 def test_point_metrics():
@@ -632,6 +680,47 @@ def test_straighten_safety_net():
     assert (out, code) == (None, 2) and agree < buildings.STRAIGHT_AGREE
 
 
+def test_main_rectangle():
+    """The main rectangle of a 10 x 4 m rectangle's pixel outline, turned 30 and 12 degrees: within
+    ~1% of the rectangle (the cover crosses half in the staircase's middle, not a cell further out),
+    and exact when square to the pixels. A narrow bit sticking out (a tree's edge) is cut off and a
+    shallow bite filled in."""
+    for angle in (30, 12, 0):
+        pixels = pixel_outlines(turned(lambda u, v: (abs(u) < 5) & (abs(v) < 2), angle))[1]
+        r = buildings.polygon_rings(buildings.main_rectangle(buildings.polygon_rings(pixels)[0]))[0][0]
+        sides = np.hypot(*np.diff(r, axis=0).T)
+        assert len(r) == 5 and sorted(sides[:2]) == pytest.approx([4, 10], abs=0.07)
+        turn = np.degrees(np.arctan2(*(r[1] - r[0])[::-1]))
+        assert (turn - angle + 45) % 90 - 45 == pytest.approx(0, abs=1)
+    # 10 x 6 m, a 2 x 2 m bite out of a corner, a 1 x 3 m bit sticking out of the top
+    ring = np.array([(0, 0), (8, 0), (8, 2), (10, 2), (10, 6), (5, 6), (5, 9), (4, 9), (4, 6), (0, 6), (0, 0)], float)
+    r = buildings.polygon_rings(buildings.main_rectangle([ring]))[0][0]
+    assert r.min(axis=0) == pytest.approx([0, 0], abs=0.1) and r.max(axis=0) == pytest.approx([10, 6], abs=0.1)
+
+
+def test_square_up():
+    """The last step: a pixel outline (1.5 corners per m) becomes its main rectangle. A rectangle (not
+    crinkly) stays, and so does a star like a crown (its rectangle overlaps it 0.3: too little). Two
+    parts each get their own rectangle, not one over both. A crinkly shed beside a straight house
+    changes, but not the biggest part: the outline code stays the house's."""
+    shed = lambda u, v: (abs(u) < 5) & (abs(v) < 2)
+    pixels = pixel_outlines(turned(shed))[1]
+    out, changed, main = buildings.square_up(pixels)
+    assert changed and main and out.GetGeometryRef(0).GetPointCount() == 5
+    assert out.GetArea() == pytest.approx(40, rel=0.03)
+    rect = np.array([(0, 0), (10, 0), (10, 6), (0, 6), (0, 0)], float)
+    assert buildings.square_up(buildings.from_rings([[rect]]))[1:] == (False, False)
+    a = np.radians(np.arange(24) * 15)
+    star = np.c_[np.cos(a), np.sin(a)] * np.where(np.arange(24) % 2, 0.6, 3)[:, None]  # 0.41 corners per m
+    assert buildings.square_up(buildings.from_rings([[np.vstack([star, star[:1]])]]))[1] is False
+    two = pixel_outlines(turned(lambda u, v: shed(u - 8, v) | shed(u + 8, v)))[1]
+    out, changed, main = buildings.square_up(two)
+    assert changed and main and out.GetGeometryCount() == 2 and out.GetArea() == pytest.approx(80, rel=0.03)
+    house = buildings.from_rings([[rect * 2 + (-40, -6)]])  # 20 x 12 m, 4 corners: not crinkly
+    out, changed, main = buildings.square_up(house.Union(pixels))
+    assert changed and not main and out.GetArea() == pytest.approx(240 + 40, rel=0.01)
+
+
 def test_trace_fills_small_holes():
     """A one-pixel hole in a roof (a low pixel: a skylight, a wet spot) is filled; a 2 x 2 m light
     well stays."""
@@ -859,6 +948,7 @@ def test_analyze_layers():
     fp, cr = out["footprints"], out["crowns"]
     house, rock = near(fp, 1010, 2028), near(fp, 1012, 2008)
     assert len(fp["x"]) == 2 and fp["building"][house] == 1 and fp["building"][rock] == 0
+    assert fp["ground_slope"].tolist() == fp["ground_tpi"].tolist() == [0, 0]  # flat ground
     tree, rock_crown = near(cr, 1030, 2030), near(cr, 1012, 2008)
     assert len(cr["x"]) == 2 and cr["roof_seed"][tree] == 0 and cr["roof_seed"][rock_crown] == 1
     assert "building" not in cr and "roof_seed" not in fp
@@ -880,6 +970,19 @@ def test_analyze_layers():
     assert fp["cover_min"][house] == 1  # one flight line: the same as cover
     assert cr["top"][tree] == pytest.approx(12 - 2.5 * np.hypot(0.125, 0.125)) and cr["i_mean"][tree] == 300
     assert cr["cover"][tree] > 0.9  # a few edge pixels also hold ground hits
+
+
+def test_analyze_drops_bridge_deck():
+    """The house's flat top labelled a bridge deck (class 17) by the lidar: dropped like noise, it
+    leaves no object, only a hole in the dsm (the deck hid what is under it). The rock stays."""
+    w = ts.Window("scene", (1000, 2000, 1040, 2040), (1000, 2000, 1040, 2040))
+    pts = scene_points()
+    deck = (abs(pts["X"] - 1010) < 5) & (abs(pts["Y"] - 2028) < 6)
+    pts["Classification"][deck] = buildings.BRIDGE_DECK
+    out = buildings.analyze(pts, w)
+    fp = out["footprints"]
+    assert fp["building"].tolist() == [0] and np.hypot(fp["x"][0] - 1012, fp["y"][0] - 2008) < 2  # the rock
+    assert np.isnan(out["dsm"].data[24, 20])  # (1010, 2028)
 
 
 def tree_over_house():

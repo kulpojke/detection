@@ -5,11 +5,14 @@ are given with their values. The numbers in brackets come from the two test site
 WA_NorthEast_2_B22, at 12–15 pulses/m²: Chewelah (a town) and Nine Mile Falls (forest with
 houses). `HANDOFF.md` has the history and `test/README.md` lists what each test checks.
 
-State on 2026-11-10: everything described here is in the code. Since run 28 the walls of
+State on 2026-11-11: everything described here is in the code. Since run 28 the walls of
 straightened buildings move to where the points put them (section 7), and since run 29 a small
 roof seed piece whose flood is a crown makes a tree (section 3). `detect.py` runs a whole area,
 joins lidar sets where they meet, maps when each part was flown and looks at NAIP's green on the
-roofs (section 8).
+roofs (section 8). Since 2026-11-11 bridge decks are dropped (section 2), and the rule turns
+down small objects 12 m or higher and objects on steep ground (section 4). Since 2026-11-12 it
+also turns down small objects on a canyon's floor (`ground_tpi`, section 4), and crinkly
+footprints become their main rectangle as the last step (section 7b).
 
 ---
 
@@ -77,7 +80,7 @@ fine enough for a 2 × 3 m shed.
 | raster | definition | what it shows |
 |---|---|---|
 | `dtm` | mean height of the ground points (class 2); empty pixels take the nearest ground pixel's | the ground, also under buildings |
-| `dsm` | highest point (noise dropped); gaps up to 1 m filled | the top surface |
+| `dsm` | highest point (noise and bridge decks dropped); gaps up to 1 m filled | the top surface |
 | `ndsm` | dsm − dtm | height above ground; objects are > 2 m (`MIN_HEIGHT`) |
 | `ground_gap` | distance to the nearest pixel with a ground point | covered holes |
 | `multi_return` | share of the pulses with more than one return, over 3 × 3 pixels | hard surface or foliage |
@@ -95,6 +98,11 @@ Why these three clues tell roofs from trees:
 - **A roof is made of planes.** For any plane z = a + bx + cy the Laplacian
   ∂²z/∂x² + ∂²z/∂y² is 0, so flat and evenly sloping roofs both have roughness 0. Only ridges
   and edges show up, as lines. A crown bends everywhere.
+
+A bridge deck is opaque, smooth and stops pulses at once too: it looks like a roof. The USGS
+lidar specification asks for bridge decks in their own class (17), so they are dropped like
+noise (`BRIDGE_DECK`). The dsm then shows what is under the deck, mostly nothing, since the
+deck hid it. A set without class 17 keeps its bridges.
 
 ---
 
@@ -184,7 +192,7 @@ metrics from its points.
 flowchart LR
   O["Object"] --> A{"Roof seed?"}
   A -- no --> N["0: not a building"]
-  A -- yes --> B{"split below 0.35, roughness_inside below 0.5 (0.3 under 25 m²), area 4 m² or more, cover_min not below 0.2"}
+  A -- yes --> B{"split below 0.35, roughness_inside below 0.5 (0.3 under 25 m²), area 4 m² or more, cover_min not below 0.2, under 12 m high if under 40 m², ground_slope below 35° (25° under 40 m²), ground_tpi above −8 m if under 40 m²"}
   B -- no --> N
   B -- yes --> C{"Under 40 m²?"}
   C -- yes --> S["2: shed, container or RV"]
@@ -208,7 +216,72 @@ Each condition comes from objects labelled in QGIS:
   | a rock (a dome) | 0.61 | fails |
   | a 180 m² house with a complex roof | 0.40 | passes |
 - **At least 4 m².** The smallest checked shed is 7.5 m².
-- **`cover_min` not below 0.2.** This is the vehicle guard, described next.
+- **`cover_min` not below 0.2.** This is the vehicle guard, described below.
+- **A small structure is lower than 12 m.** A shed, container or RV (under 40 m²) isn't 12 m
+  high. In the Camp Fire run 106 of 10,709 were. 49 were pieces of power-line wire 71–83 m
+  over water: nothing returns from the water, so the wire has no ground under it and looks
+  like a roof. Others were pieces of bridges and smooth bits of crowns.
+- **The ground is not steep** (`ground_slope`, below).
+- **A small structure is not on a canyon's floor** (`ground_tpi`, below).
+
+**`ground_slope`.** This is the median slope of the dtm in a ring 2–10 m around the object. It
+isn't read under the object, because there the dtm is only filled in from around it. A
+building stands on ground less steep than 35°, a small one (under 40 m²) on ground less steep
+than 25°. Steeper places held rocks and cliffs, road fills and bridges, and white water in a
+gully. The thresholds come from the Camp Fire run: random samples of 12 objects, looked at over
+NAIP, and the real buildings in each:
+
+| ground slope | small (code 2) | big (code 1) |
+|---|---|---|
+| under 10° | 6 of 12 | |
+| 10–20° | 4 of 12 | |
+| 20–25° | 0–1 of 12 | 4 of 12 |
+| 25–30° | 0 of 12 | 3 of 12 |
+| 30–35° | 0 of 12 | 0–1 of 12 (over 30°) |
+| over 35° | 0 of 12 | 0 of 12 |
+
+So the rule drops about 1,170 small and 31 big objects of the 28,513. A check rerun of 10
+squares lost no real building: central Paradise kept all 229, and houses on 25–30° ground
+stayed. Chewelah (a town on flat ground) has no building over 24°.
+
+The slope can't catch everything. Granite boulders on a flat river bed (the Feather River,
+Butte Creek) are smooth and have no ground under them, and they stand on flat ground. After the
+slope rule, they were the biggest group of false buildings left in the canyons.
+
+**`ground_tpi`.** A river bed is flat, but it lies low: the canyon's walls rise on both sides.
+The topographic position index (TPI) measures that. It is the height of the ground the object
+stands on minus the height of the ground further away:
+
+- the ground it stands on is the median dtm in the same ring as `ground_slope` (2–10 m around the
+  object);
+- the ground further away is the median dtm 20–50 m from the object's point, sampled every
+  2.5 m (about 1,000 heights; `TPI_RING`, `TPI_STEP`).
+
+Negative values mean the object lies low. A small structure (under 40 m²) must have a
+`ground_tpi` above −8 m. The 50 m is chosen to fit in the halo: the point lies in the window's
+core, so every window that could keep the object reads the same ground, and the value is the same
+(checked: Chewelah as four squares and as one window, every `ground_tpi` equal).
+
+The threshold comes from the Camp Fire run, looked at over NAIP. It counts the small objects that
+the slope and height rules left:
+
+| ground_tpi | small objects | real in the sample |
+|---|---|---|
+| −3 to −2 m | 242 | 3 of 12 |
+| −4 to −3 m | 136 | 0–1 of 12 |
+| −5 to −4 m | 101 | 1–2 of 12 |
+| −7.5 to −5 m | 133 | 1–3 of 36 (a trailer at −7.5 m) |
+| below −7.5 m | 197 | 0 of 30 (boulders on river beds, trees in ravines) |
+
+At −8 m the rule drops 173 small objects. Big objects aren't judged by it, because a house can
+stand in a valley. All 51 big objects below −5 m were looked at: 48 were boulders, trees in
+ravines or road bridges, but 3 were real buildings, at −5.0 to −5.6 m. Below −6 m all 38 were
+false, and the README of `detect.py` suggests checking them by hand. Chewelah's buildings lie
+between −2.0 and +0.7 m.
+
+An earlier try measured the far ground 30–75 m from the object. That reached outside the halo,
+and it also put a real house (with a pool, by a road) at −10 m. With 20–50 m, that house is at
+−4 m.
 
 **`cover_min`.** Each flight line is one pass at one time. Chewelah has four lines: three
 within 24 minutes and one three days later. For one line, `cover` is the share of its first
@@ -399,6 +472,80 @@ moved walls give 120 ± 2 m². The footprints' `area` column stays the pixel cou
 
 ---
 
+## 7b. The last step: crinkly outlines become rectangles (`square_up`, `main_rectangle`)
+
+The safety net of section 6 leaves many buildings crinkly. In the Camp Fire run, 70% of them
+weren't straightened:
+
+- 8,377 were under 25 m², so they kept their pixel outline;
+- 11,093 had walls that didn't agree, mostly because trees bite the outline.
+
+So the last step works on the geometry alone, Michael's idea (2026-11-12): **a footprint part
+with too many corners for its length becomes its main rectangle.**
+
+**Crinkly.** The measure is corners per metre of outline. A 10 × 6 m rectangle has 4 in 32 m
+(0.125/m). The Camp Fire footprints fall into three clear groups:
+
+| outline | corners per m (10th–90th percentile) |
+|---|---|
+| straightened (`outline` 0) | 0.11–0.26 |
+| simplified (codes 2–4) | 0.30–0.57 |
+| pixel outlines (code 1) | 1.0–1.5 |
+
+A part with more than 0.3 per m (`SQUARE_CORNERS`) is crinkly. Each part of a MultiPolygon is
+judged on its own and gets its own rectangle. Two buildings in one object must not become
+one box over both and the yard between them.
+
+**The main rectangle.** The rectangle is built in three steps:
+
+1. The part is turned onto its main direction, found as in section 6 from its walls.
+2. It is filled on a 0.25 m grid (`SQUARE_FINE`), and the cover of each column (along) and each
+   row (across) is counted.
+3. Along it, the rectangle runs over the columns that cover at least half (`SQUARE_COVER`) of the
+   median column; across it the same, by rows.
+
+So a narrow bit sticking out, such as a tree's edge, is cut off, while a shallow bite, such as
+a tree over the roof, is filled in. A minimum bounding rectangle would grow to take in every
+bit sticking out.
+
+Each end lies where the cover crosses that half, interpolated between the column centres. A
+pixel staircase's cover falls from full to none across the true edge, and passes half in its
+middle. Without interpolation the rectangle was one grid cell too big on every side, about 9%
+of a shed's area. With it, a 10 × 4 m rectangle's pixel outline turned 30° gives 10.06 × 4.03 m.
+
+**The guard.** The rectangle is used only if it overlaps the part at least 0.5
+(intersection / union, `SQUARE_MIN_IOU`). Below that were mostly crowns and rocks taken for
+buildings, a few complex buildings, and two buildings in one part. A footprint gets `outline` 6
+when its biggest part changed. The code tells how the main shape was made, so a small sliver
+beside a straightened house becomes a rectangle, but the house keeps its code 0.
+
+**An L or T that isn't crinkly stays.** A part with n corners is crinkly only if its outline is
+shorter than n / 0.3 m: an L (6 corners) under 20 m, about 6 × 4 m; a T or U (8 corners) under
+27 m, about 8 × 5 m. A house of that shape has a longer outline. On the Camp Fire run none of
+the parts that changed had 6 corners; those with 7 or 8 were sheds of about 30 m² with one
+small step.
+
+**On the Camp Fire run** (on its footprints afterwards, `square_real.py` in the scratchpad):
+
+| outline before | changed | new / old area (median; 10th–90th percentile) |
+|---|---|---|
+| straightened (0) | 543 of 8,646 (225 only in a small extra part: they keep code 0) | 1.00 (0.96–1.21) |
+| pixel outlines (1) | 7,998 of 8,377 | 1.08 (0.99–1.44) |
+| walls don't agree (2) | 10,729 of 11,093 | 1.11 (0.98–1.45) |
+
+Over NAIP, tree-bitten houses get the rectangle of their roof, and trailers and sheds become clean
+boxes. The area grows because bites are filled. For a house under a tree that is right, since
+its roof goes on under the tree. For a crown taken for a building it is wrong, but the object was
+wrong anyway. Big complex buildings (a T, an annex) lose their shape, and a rectangle can reach
+into the yard: that is the price of being aggressive. In all, 19,321 footprints get code 6.
+Chewelah: 52 of 189 changed, 50 of them in their biggest part (small ones
++6%, tree-bitten +3%). The geometries are the same with four squares or one window.
+
+**A known bias.** The rectangle is made from the outline, so it keeps the pixel outline's bias
+(section 7): the walls aren't moved onto the roof's edge again.
+
+---
+
 ## 8. A whole area (`detect.py`): several lidar sets, and a look at NAIP
 
 **Squares.** `detect.py` lays 500 m squares on a grid in the output CRS (NAD83(2011) UTM at the
@@ -491,8 +638,12 @@ NAIP to the lidar's crowns block by block before counting.
 | Roofs are opaque | solid materials | glass roofs; skylights (holes under 1 m² are filled) |
 | Roofs are made of smooth planes | most roofs | gravel roofs with equipment, parapets (walls keep their pixel place) |
 | The ground classification is right | the USGS ground filter | a terrace on a steep slope can look like a roof |
-| Smooth, high, with no ground under it, is a roof | buildings are | bridges and power-line wires over canyons and water (Camp Fire: the Pulga railway bridge; 105 code 2 objects more than 12 m up, most of them wire) |
+| Smooth, high, with no ground under it, is a roof | buildings are | bridges and power-line wires over canyons and water. Now dropped: bridge decks the lidar marks (class 17), small objects 12 m or higher (wire pieces), anything on steep ground. Left: bridges in sets without class 17, on gentle ground |
+| Buildings stand on gentle ground | houses are built on pads | a house on a lot steeper than 35°, a shed on one steeper than 25° (none seen in the Camp Fire samples) |
+| A rock is rough (a dome) | most rocks | big, flat-topped granite boulders on a flat river bed (Camp Fire canyons). Now dropped when small and 8 m or more below the ground 20–50 m away (`ground_tpi`). Left: big boulders (code 1), and small ones on wide or shallow river beds |
+| Small structures don't stand on a canyon's floor | sheds stand by houses, on dry ground | a cabin's shed or a trailer deep in a narrow valley (one trailer seen at −7.5 m) |
 | Buildings are rectilinear | most buildings | round or curved buildings (no straightening, `outline` 2) |
+| A crinkly outline is a rectangle | sheds, trailers, tree-bitten houses | L, T and complex buildings with crinkly outlines become one rectangle (`outline` 6, section 7b) |
 | Things stay put between passes | buildings do | parked vehicles look like sheds |
 | Objects are under ~100 m | halo of 50 m | big warehouses would need a larger halo |
 | A lidar set's name gives its date | most sets are flown in weeks | B4 2018 (Camp Fire): July 2018 and three flights after the fire; `detect.py` maps the dates (section 8) |

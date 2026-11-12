@@ -155,6 +155,24 @@ Two helpers make the fake lidar:
   guard: the same shed with `cover_min` 0 (one flight line saw the ground there) fails, with
   0.63 (its real value) or NaN it passes, and without a `cover_min` column (the table above)
   too. Fails when the guard is gone, when NaN fails, and when a missing column counts as 0.
+  A small structure must be lower than `SMALL_MAX_HEIGHT` (12 m): the shed at 11.9 m passes,
+  at 12 m it fails (a piece of wire or bridge), and a house at 14 m passes. The ground: a
+  house on ground of 34.9° passes, at 35° (`BUILDING_MAX_SLOPE`) it fails; the shed at 24.9°
+  passes, at 25° (`SMALL_MAX_SLOPE`) it fails; with `ground_slope` NaN (no ground) it passes.
+  The canyon floor: the shed with `ground_tpi` −7.9 m passes, at −8 m (`SMALL_MIN_TPI`) it
+  fails (a boulder on a river bed); a house at −20 m passes (big ones aren't judged by it);
+  NaN passes. Fails when the rule is gone or also judges big ones.
+- `test_ring_median`: `ring_median` (`ground_slope`) reads the ring 2-10 m around a 5 x 5 m
+  object (`GROUND_RING`): the slope grid is 30° there and 0 everywhere else (under the object,
+  the 2 m next to it, beyond 10 m), so it must give exactly 30, also for an object at the grid's
+  top edge (the ring cut off). A slope grid of NaN (no ground points) gives NaN.
+- `test_ground_tpi`: a canyon around a 4.5 x 4.5 m object: the floor at 100 m out to 15 m from
+  its point, the walls at 120 m from 20 m (nothing in between), so `ground_tpi` is −20; also
+  with the grid cut off 2.5 m left of the point (the median of the ground that is there). Flat
+  ground gives 0, no ground NaN. Ground only within 20 m of the point and beyond 50 m gives NaN:
+  `TPI_RING` reads neither. Fails without ring_median (the floor's height) and without either
+  end of `TPI_RING`. Without the check for the grid's edges, `test_analyze_layers` fails (its
+  40 m grid is smaller than `TPI_RING`: negative indices).
 - `test_describe_roughness_inside`: on a 3 x 4 m flat shed half the pixels are edge pixels,
   so its median `roughness` is high (> 1), but `roughness_inside` is 0. A dome-shaped rock
   stays rough inside (a paraboloid: Laplacian 0.625 everywhere).
@@ -197,6 +215,17 @@ Two helpers make the fake lidar:
   apart: a wall moves to the middle of its pixel staircase, not outward.
 - `test_straighten_safety_net`: a 2 x 3 m shed is too small (code 1), and a disc's walls point
   every way, so they don't agree on a direction (code 2); neither gets a new outline.
+- `test_main_rectangle`: the pixel outline of a 10 x 4 m rectangle turned 30°, 12° and 0°
+  gives a rectangle within 0.07 m of 10 x 4, in the turned direction (±1°). Fails without
+  the interpolated ends (`cover_ends`: a cell too big on every side). A 10 x 6 m rectangle with
+  a 2 x 2 m bite out of a corner and a 1 x 3 m bit sticking out of the top gives 10 x 6 (bite
+  filled, bit cut off); fails when every column counts (no `SQUARE_COVER`).
+- `test_square_up`: the turned pixel outline (1.5 corners per m) becomes a 4-corner rectangle
+  of ~40 m²; a plain rectangle (not crinkly) and a 24-corner star like a crown (its rectangle
+  overlaps it 0.3, under `SQUARE_MIN_IOU`) stay; two such sheds in one MultiPolygon each get
+  their own rectangle; a shed beside a 20 x 12 m house (not crinkly) changes, but not the
+  biggest part (no code 6). Fails without the corner test or the overlap guard, or when the
+  biggest part's flag is any part's.
 - `test_trace_fills_small_holes`: a one-pixel hole in a roof is filled, a 2 x 2 m light well
   stays.
 - `test_tree_notch`: a tree over a roof's corner leaves a diagonal wall with tree in front of
@@ -249,7 +278,11 @@ Two helpers make the fake lidar:
   (`walls_moved` 0, `wall_shift` empty). The tree's polygon lies around
   its top, with about the cone's area. The point metrics fit: the house is a flat 4 m roof (`h_std` 0, `cover` 1,
   its intensity, and `cover_min` 1: the scene has one flight line), and the tree's `top` is its
-  highest point, with its own intensity.
+  highest point, with its own intensity. The ground is flat: `ground_slope` and `ground_tpi` 0.
+- `test_analyze_drops_bridge_deck`: the same scene with the house's points labelled bridge
+  deck (class 17, `BRIDGE_DECK`) by the lidar. They are dropped like noise, so no object is
+  left there, only a hole in the dsm (NaN at the house's middle: the deck hid what is under
+  it). The rock is the only footprint. With the class kept, the deck is a building (code 1).
 - `test_analyze_roof_under_tree`: the whole `analyze()` on the house with a crown over its
   north-east corner (`tree_over_house`; every other pulse in the crown gets through). The rule
   sees the visible roof (under 113 m²); the footprint gets the roof under the tree back

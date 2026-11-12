@@ -6,3 +6,4 @@ __pycache__/
 tmp_symlinks/
 # detection runs (detect.py output): big, and rebuilt from the code
 runs/
+runs2/
