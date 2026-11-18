@@ -33,13 +33,13 @@ building logic goes into it.
   (the ground 2–10 m around) must be under 35°, or 25° under 40 m² (rocks, cliffs, road fills).
   2026-11-12 (Michael chose the canyon-floor option): `ground_tpi`, the ground around an
   object minus the ground 20–50 m from its point; a building under 40 m² must have it above
-  −8 m (boulders on river beds). `runs/camp_fire_prefire` is still from the old code: the
-  rerun (about 3 h) goes to `runs2/camp_fire_prefire`, and the old run stays for comparison. Notes on how power lines show up, for later:
+  −8 m (boulders on river beds). `runs/camp_fire_prefire` is from the old code; the rerun
+  with these rules (2026-11-12, commit cf911e8) is `runs2/camp_fire_prefire` (see below). Notes on how power lines show up, for later:
   `utility_lines_notes.md`.
 - **Crinkly footprints become rectangles (2026-11-12, Michael's request):** a last,
   geometry-only step (`square_up`, `outline` 6; see "`outline` codes" under Building
   detection). In the Camp Fire run 70% of the buildings weren't straightened (small, or
-  tree-bitten); about 19,600 would change. Not in `runs/camp_fire_prefire` (the rerun: `runs2/`).
+  tree-bitten); in the rerun (`runs2/`) 18,051 buildings got `outline` 6.
 - **Offline suite: 83 passed** (10 network tests skipped), in about 25 s.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
@@ -701,8 +701,16 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `runs/` (git-ignored): detect.py runs. `runs/camp_fire_prefire/`: the Camp Fire pre-fire
   buildings (`buildings.gpkg`), with `README.md`, `inputs/` (the perimeter, the NAIP tile list),
   `code/` (the code the squares ran with), `flown/` and `flown.gpkg` (the flight dates) and
-  `share/camp_fire_prefire.zip` (what to pass on). `runs2/` (git-ignored): the rerun with
-  the rules of 2026-11-11 and 11-12, `runs/` kept for comparison.
+  `share/camp_fire_prefire.zip` (what to pass on). `runs2/camp_fire_prefire` (git-ignored):
+  the rerun with the rules of 2026-11-11 and 11-12 (commit cf911e8), `runs/` kept for
+  comparison. 23,192 buildings flown before the fire (first run 24,440). Of the first run's
+  28,513 buildings (`footprints.gpkg`, `building` > 0) 1,462 are turned down: steep ground
+  1,168 (1,139 of them small), canyon floor 171, small and 12 m or taller 86, no object
+  within 2 m 35 (probably bridge decks), other 2; 6 are new. Outline codes: 0 8,321, 6
+  18,051, the rest 685. The footprints of the buildings in both grow 2% at the median (90th
+  percentile 34%), 385.9 → 419.1 ha in all: the rectangles fill bites. Comparison: scratchpad
+  `compare_runs.py`; the dropped ones with their reason in `dropped_run2.gpkg`. Two batches
+  crashed once on an S3 read (`exit -6`) and finished on the retry.
 - `tmp_symlinks/camp_fire_inputs/` (git-ignored): the perimeter as downloaded, NAIP 2018
   (`naip_2018/`, 35 tiles as they are, `tiles.json`, `naip_2018.vrt`), the STAC search results.
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
