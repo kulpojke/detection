@@ -7,7 +7,8 @@ the small seeds in crowns (`merge_parts`, run 29, from Michael's survey labels),
 `detect.py` with the NAIP check (`naip_green`), the flight dates (`--before`) and the Camp Fire
 pre-fire run (`runs/camp_fire_prefire`); 2026-11-11: bridge decks dropped, the height rule for
 small structures and `ground_slope`, notes on utility lines; 2026-11-12: `ground_tpi`, the
-canyon-floor rule for small structures, crinkly footprints become rectangles)._
+canyon-floor rule for small structures, crinkly footprints become rectangles; 2026-11-19:
+`change.py`, before and after: the shift between two lidar sets, the pairs, "seen", the predictions and a README per run)._
 
 ## Goal
 A reusable point-cloud querying layer. Give it an EPT (any USGS 3DEP project in
@@ -20,6 +21,9 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-10)
+- **Before and after (2026-11-19, Michael's request): `src/change.py`, in progress.** It matches
+  post-event footprints to pre-event ones, so a building that survived keeps its pre-fire
+  footprint and ID. See "Before and after".
 - **Camp Fire, pre-fire buildings (2026-11-10, Michael's request, for someone else):**
   `src/detect.py` ran buildings.py over the whole fire perimeter from both pre-fire sets
   (`runs/camp_fire_prefire/`, git-ignored; its `README.md` says where everything came from).
@@ -40,7 +44,10 @@ building logic goes into it.
   geometry-only step (`square_up`, `outline` 6; see "`outline` codes" under Building
   detection). In the Camp Fire run 70% of the buildings weren't straightened (small, or
   tree-bitten); in the rerun (`runs2/`) 18,051 buildings got `outline` 6.
-- **Offline suite: 83 passed** (10 network tests skipped), in about 25 s.
+- **Offline suite: 98 passed** (10 network tests skipped), in about 15 s (2026-11-19: 83 + 15
+  for change.py). One harmless warning: after a test that reads or writes a file with geopandas,
+  pyogrio routes GDAL's messages into Python warnings, so GEOS's "Self-intersection at ..." in
+  `test_refine_walls`'s `IsValid()` shows up.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
   commit `8966d9e`) passed: 10 of 10, in 2 min 46 s.
 - **First use case: the 2018 Camp Fire** (Paradise, CA). `camp_lidar_memo.md` lists the
@@ -618,6 +625,110 @@ automatic result, a test case to refine later. Everything is in `runs/camp_fire_
   the bridge. **Not checked:** buildings one by one, the other code 2 objects in the forest
   (35% of the buildings; many are small), the thresholds on QL1 B2.
 
+## Before and after (2026-11-19, in progress)
+Michael's request: match the buildings found in post-fire lidar to the pre-fire ones, so that a
+building that survived keeps **the same footprint and ID**. Two detections of one house never
+give the same polygon (another flight, QL2 vs QL1, trees burned off), so the sets are matched,
+not compared polygon by polygon.
+
+**Goals** (Michael, 2026-11-19):
+- **The lidar model is reusable on other fires,** so `change.py` knows nothing about a fire, a
+  place or a damage survey.
+- It is **separate from the QAQC app** (damagemap-qaqc). Today it makes input for QAQC; later
+  it is one part of an ensemble/fusion building damage detector.
+- **Output: three layers**, `pre`, `post` and the predictions (a status per building, its
+  evidence, and "not seen" kept apart from "gone").
+- **Validation against CAL FIRE's DINS points,** scored three ways: gone ↔ Destroyed; gone ↔
+  Destroyed + Major; and with Major left out. The QAQC reviewers' labels are a second check
+  later. They only see pre-fire footprints, so the lidar's verdict can't sway them.
+- Not now: the recovery lidar (2021).
+
+**Two processes, kept apart:**
+1. **Central and east Paradise** (pre- and post-fire lidar): the model, validated. DINS must
+   stay out of its rule.
+2. **Western Paradise** (no pre-fire lidar; B4 west was flown after the fire): only a way to get
+   footprints, never reported as validated. "Before" there is the DINS points: a non-Destroyed
+   point with a 2019 building on it gets that footprint, before and after, keeping the Overture
+   ID where they overlap. It belongs on the QAQC side (damagemap-qaqc/data), not here. Why it
+   needs its own rule: the app's "before" there is Overture 2024 (survivors and rebuilt houses;
+   7% of the Destroyed DINS points have a building within 5 m), which turns gone and new around.
+
+**Test box** (tuning; hold its DINS points out of the score): EPSG:6339 618000 4401000 619500
+4402500, central Paradise, all flown 2018-07-07 before the fire. Of the 1.5 km boxes in the
+pre-fire lidar it has the most standing DINS: 945 points, 702 Destroyed, 242 standing (No
+Damage, Affected, Minor), 1 Major. Survivors are rare everywhere (15,071 of 17,327 DINS points
+are Destroyed), so score each class on its own.
+- `runs2/camp_fire_postfire_test/`: detect.py on `USGS_LPC_CA_NoCal_Wildfires_CampFire_2018`
+  over that box (flown 2019-02-21 to 03-15), with no `--before` and no `--naip` (NAIP 2018 is
+  pre-fire). It ran 23 squares, not 9: detect.py turns a `--bbox` into lon/lat and back, which
+  grows it a little, so the ring of neighbours touches it too (small fix to do in
+  `plan_squares`).
+- In the box: 1,027 buildings before (750 code 1, 277 code 2), 507 after (282 / 225).
+
+**The shift: a datum mix-up.** From the clear pairs (one to one, each covering ≥ 0.7 of the
+other), the 2019 lidar sits **1.36 m west and 0.23 m north** of the 2018 lidar (spread 0.13 /
+0.16 m, 202 pairs). It is the same in all 9 squares (east −1.22 to −1.48 m). PROJ gives
+NAD83(2011) → ITRF2014 (and WGS84 G1762) at Paradise as −1.46 / +0.27 m. So upstream one set
+was probably converted with a real NAD83 → WGS84 transformation and the other as if NAD83
+were WGS84. Which one is right doesn't matter here: post is moved onto pre, the project's
+frame (the app's footprints, and the imagery: `coregister_waldoair.ipynb` was fitted to
+`runs2/camp_fire_prefire/ndsm.vrt`). After the shift, 176 of the 1,027 buildings before have a
+best share of 0.9-1 (56 without it). In the clear pairs the heights agree to +0.01 m (MAD
+0.03 m), a strong second clue.
+
+**`change.py` (steps 3a and 3b done):**
+1. **read:** both sets in one metric CRS (`--box` keeps buildings whose representative point is
+   inside).
+2. **`estimate_shift`:** a rough first round from one-to-one pairs with shares ≥ `ROUGH_SHARE`
+   0.3, so a shift of a few metres is still found; then clear pairs only (`CLEAR_SHARE` 0.7)
+   until less than 1 cm is left. Fewer than `MIN_PAIRS` 30 → no shift.
+3. **`seen`:** did each lidar see each building's spot, from detect.py's `flown/<set>.tif`
+   (`--pre-flown`, `--post-flown`), and with `--event` at the right time. **"Gone" says the
+   lidar after looked and found nothing; "not seen" says it never looked**, so it has no opinion,
+   which a fusion step can use: it then trusts the other sources there.
+   - Seen = points, at the right time, under the footprint's representative point, and
+     wherever there are points under its corners, at the right time too.
+   - A corner over an empty cell doesn't count against it. The first version wanted points
+     under every corner, and 31 buildings at the edge of the run came out unseen: their middle
+     was in a square that was run, a corner in one that wasn't, though detect.py saw them whole
+     (its 50 m halo).
+   - The post lidar's maps are read at the footprint moved back by the shift (they are in its
+     own frame).
+4. **`pairs`:** every pair that shares area, with each one's share.
+5. **`predictions`:** a row per building before, and one per building after with no pair.
+   - `status`: `survived` (best pair's smaller share ≥ `SURVIVED_SHARE` 0.5), `gone` (buildings
+     after cover < `GONE_COVER` 0.1 of it), `unsure` (in between), `not_seen` (a lidar didn't
+     see the spot), `new` (a building after without a pair, both lidars saw the spot).
+   - The evidence: `best_share`, `of_pre`, `of_post`, `covered`, `n_post`, `n_pre` (merged
+     outlines), and `height_pre`, `height_post`, `height_change`, evidence only for now.
+   - The thresholds are first guesses, to be chosen in step 4.
+
+It writes the layers `pre`, `post` (moved; `moved_x`, `moved_y`) and `predictions`, and
+**`<OUT>_README.md` beside it**: written by each run, like detect.py's, with the command, the
+code version, the inputs, the shift in words, the status counts, the columns and the limits.
+About 1 s on the box:
+
+    python src/change.py runs2/camp_fire_postfire_test/change.gpkg --pre runs2/camp_fire_prefire/buildings.gpkg \
+        --post runs2/camp_fire_postfire_test/buildings.gpkg --box 618000 4401000 619500 4402500 \
+        --pre-flown runs2/camp_fire_prefire/flown/*.tif --post-flown runs2/camp_fire_postfire_test/flown/*.tif \
+        --event 2018-11-08
+
+**In the box:** survived 305, unsure 44, gone 678, not seen 0 (all of the box was flown in July
+2018 and in 2019), new 124. The mean height change is +0.01 m for survived, −0.05 for unsure.
+**Without the box** (all 23,192 pre-fire buildings, the post run covers only 23 squares):
+not seen 20,651, instead of 20,000-odd false "gone". The lidar before didn't see 34 of the 1,077
+buildings after: 31 lie where B4 was flown only on 2019-08-09 (the ring's southwest square),
+which would otherwise be false "new". 4 buildings before have their middle in a square that
+wasn't run.
+
+**Next:**
+- **Step 4, the DINS check in the test box:** choose `SURVIVED_SHARE` and `GONE_COVER` (and
+  whether `height_change` belongs in the rule), scored three ways (gone ↔ Destroyed; ↔
+  Destroyed + Major; Major left out). The scoring code holds DINS, so it stays outside
+  change.py.
+- Then the whole perimeter (Michael's run, hours), the scores outside the test box, and the
+  western Paradise footprints on the QAQC side.
+
 ## Tests
 Run from the project root, inside a memory cap:
 
@@ -669,7 +780,10 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 
   Versions: python 3.12, PDAL 2.10.2, python-pdal 3.5.5, GDAL 3.13.3, numpy 2.5.4,
   scipy 1.18.1, scikit-image 0.26.0 (added 2026-11-02, for the watershed in buildings.py),
-  pyproj 3.8.0, laspy 2.7.0 (with lazrs, for validation only), pytest 9.2.
+  pyproj 3.8.0, laspy 2.7.0 (with lazrs, for validation only), pytest 9.2. Added 2026-11-19
+  for change.py (`mamba install -n tilestream -c conda-forge geopandas pyarrow`): geopandas
+  1.2.0 and pyarrow 25.0.1, which brought pandas 3.1.1, shapely 2.2.0 and pyogrio 0.13.0;
+  nothing pinned changed.
 - **`environment.yml`** pins those same versions (conda-forge only), for CI and for a new
   machine: `mamba env create -f environment.yml`. When you change the local env, change
   this file too, so CI keeps testing what runs locally.
@@ -681,9 +795,10 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
     and dateutil;
   - analyses would silently get the old scipy instead of the env's.
 
-  The variable is inherited by subprocesses (the CLI tests, `--exec` scripts). A
-  permanent fix is still to be decided: move that folder away if nothing uses it, or
-  keep exporting the variable.
+  The variable is inherited by subprocesses (the CLI tests, `--exec` scripts). A conda env
+  doesn't switch that folder off (a venv would). **2026-11-19: Michael renamed it to
+  `site-packages.off`**, so nothing is shadowed any more; the variable is harmless and stays
+  in the commands, for machines that still have such a folder.
 - `tilestream.py` sets PROJ_DATA/GDAL_DATA itself, so the env's python works without
   `conda activate`. A script that uses GDAL's coordinate systems without importing
   tilestream needs `PROJ_DATA=~/miniforge3/envs/tilestream/share/proj` (else "PROJ:
@@ -714,7 +829,11 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
 - `tmp_symlinks/camp_fire_inputs/` (git-ignored): the perimeter as downloaded, NAIP 2018
   (`naip_2018/`, 35 tiles as they are, `tiles.json`, `naip_2018.vrt`), the STAC search results.
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
-- `test/test_tilestream.py`, `test/test_ept.py`: the tests.
+- `src/change.py`: before and after, pre- vs post-event footprints (see "Before and after").
+- `runs2/camp_fire_postfire_test/` (git-ignored): detect.py on the 2019 lidar
+  (`USGS_LPC_CA_NoCal_Wildfires_CampFire_2018`) over the test box, and `change.gpkg` with
+  `change_README.md`.
+- `test/test_tilestream.py`, `test/test_change.py`, `test/test_ept.py`: the tests.
 - `test/README.md`: what each test checks.
 - `pyproject.toml`: pytest config (pythonpath `src`, `network` marker).
 - `environment.yml`: the conda env, with pinned versions.
@@ -735,7 +854,8 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
    buildings? (Ideas, not checked: CAL FIRE's damage inspection (DINS) points of the
    structures the fire reached; building footprints made from imagery.) Then the NAIP
    alignment (below), perhaps the post-fire set (`USGS_LPC_CA_NoCal_Wildfires_CampFire_2018`,
-   QL1, 2019) for what burned, and the recovery sets (2021). Done 2026-11-10: the density and
+   QL1, 2019) for what burned (**started 2026-11-19: see "Before and after"**), and the
+   recovery sets (2021). Done 2026-11-10: the density and
    dates, the run, the flight dates.
    - **NAIP alignment:** before counting green, shift NAIP per block (e.g. 250 m) to where
      its NDVI best matches the lidar's crowns (nDSM), so tall trees no longer lean onto

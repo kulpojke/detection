@@ -1,6 +1,7 @@
 # The conda env for tilestream, buildings.py and the tests. Create it with:
 #     mamba env create -f environment.yml
 # The versions are those of the local env (2026-11-05), so CI tests what runs locally.
+# geopandas and pyarrow added 2026-11-19, for change.py (before/after matching).
 name: tilestream
 channels:
   - conda-forge
@@ -17,3 +18,5 @@ dependencies:
   - laspy=2.7.0
   - lazrs-python=0.8.2
   - pytest=9.2.0
+  - geopandas=1.2.0
+  - pyarrow=25.0.1

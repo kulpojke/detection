@@ -2,8 +2,9 @@
 
 Two kinds of tests:
 
-- **Offline** (`test_tilestream.py`): no network. Points come from a synthetic surface,
-  so they run in about 10 s and give the same result every time.
+- **Offline** (`test_tilestream.py`, `test_change.py`): no network. Points come from a
+  synthetic surface, footprints are hand-made rectangles, so they run in about 15 s and
+  give the same result every time.
 - **Network** (`test_ept.py`): read a real USGS EPT from S3. They are slower (minutes) and
   are skipped unless you pass `--ept`.
 
@@ -335,6 +336,49 @@ Two helpers make the fake lidar:
   is removed.
 - `test_exec_example_dsm_is_seamless`: the seam test for `example_dsm.sh`: eight 250 m
   windows against one 1000 x 500 m window.
+
+## test_change.py (offline)
+
+`change.py` compares footprints from before and after an event. Two helpers make them:
+`town()` is a grid of 64 rectangular houses 30 m apart (10-16 by 10-14 m, so a shift of a
+few metres never reaches a neighbour), and `after()` is the same houses moved by a known
+shift, each by up to 0.1 m more (two flights never outline a house the same), with some
+gone and some new.
+
+- `test_pairs_shares`: a 10 m house seen 2 m further east shares 80 m², 0.8 of each; a
+  house that only touches it is no pair.
+- `test_one_to_one_leaves_out_a_building_seen_in_two_pieces`: one building before, two
+  halves after: neither half is a clear pair.
+- `test_estimate_shift_finds_the_offset`: the shift is found within 3 cm, with 6 houses gone
+  and 3 new, for the Camp Fire's −1.35 / +0.23 m, for 4 / −3 m and for none.
+- `test_the_rough_round_is_needed_for_a_big_shift`: at 4 / −3 m no pair is clear (each
+  shares under 0.6 of the other), so only the rough first round (`ROUGH_SHARE`) finds the
+  shift. With `ROUGH_SHARE` set to `CLEAR_SHARE`, `estimate_shift` finds nothing.
+- `test_no_shift_from_too_few_pairs`: 9 pairs (fewer than `MIN_PAIRS`) move nothing.
+- `test_read_takes_the_id_column_or_the_fid`: the `id` column, else the fid, else `--pre-id`.
+- `test_cli_box_and_too_few_pairs`: `--box` keeps the buildings whose middle is inside it;
+  its 16 pairs are too few, so `post` isn't moved (`moved_x`, `moved_y` 0).
+- `test_cli_moves_post_onto_pre_with_enough_pairs`: the whole town: `post` is moved back by
+  the shift and each house lands on its house before.
+- `test_cli_refuses_to_overwrite_an_input`.
+
+"Seen" is read from flight-date maps like detect.py's `flown/<set>.tif`; `flown_tif()` writes
+one (10 m cells, the first and the last day flown, NaN without points), and `halves()` fills its
+left and right halves.
+- `test_seen_needs_points_under_the_middle`: a footprint is seen when the map has points under
+  its middle; a corner over an empty cell doesn't count against it (the maps cover only the
+  squares that were run); off the map, not seen; no maps, no answer (None).
+- `test_seen_checks_the_dates`: with the left half flown before the event and the right half
+  after: `before` and `after` pick the right half; a building on the edge (its middle before, a
+  corner after) is seen by neither; with a second map that flew the right half before, it is.
+- `test_predictions_statuses`: one hand-made case per status: the same house after (survived),
+  nothing (gone), 0.3 of it (unsure), a sliver of 0.05 (gone), a house there but not seen after
+  (not_seen), two houses seen as one outline (unsure, `n_pre` 2), a building after with no pair
+  (new), and one where the lidar before didn't see the spot (not_seen). Also the IDs, `covered`
+  and the height change.
+- `test_cli_writes_three_layers`: the town with 6 houses gone, a new one, and a map of the lidar
+  after without the last column of houses: 50 survived, 8 not seen, 6 gone, 1 new; the three
+  layers, and the README beside them (the shift in words, the counts, where the IDs came from).
 
 ## test_ept.py (network, real data)
 
