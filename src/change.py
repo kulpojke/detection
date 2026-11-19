@@ -44,9 +44,12 @@ CLEAR_SHARE = 0.7  # a clear pair: one to one, and each covers at least this sha
 ROUGH_SHARE = 0.3  # the first, rough guess of the shift uses one-to-one pairs from this share up
 MIN_PAIRS = 30     # with fewer clear pairs than this, no shift is taken off: too few to trust
 MIN_SHARED = 0.01  # m²: less than this is two footprints touching, not sharing area
-# The status of a building before. First guesses, to be chosen with the DINS points of a test box:
+# The status of a building before. Chosen 2026-11-19 against the DINS points of one test box in
+# central Paradise (score.py's sweep; HANDOFF.md, "Before and after"). There the balanced score
+# stayed 0.92-0.97 over 0.3-0.7 x 0.05-0.3, so they matter little; check them on other events.
 SURVIVED_SHARE = 0.5  # survived: its best pair shares at least this of each of the two
-GONE_COVER = 0.1      # gone: buildings after cover less than this share of it
+GONE_COVER = 0.2      # gone: buildings after cover less than this share of it (was 0.1: 6 more
+                      # Destroyed came out gone, no more standing ones)
 STATUSES = ("survived", "unsure", "gone", "not_seen", "new")
 
 
@@ -185,6 +188,15 @@ def seen(g, maps, before=None, after=None):
     return (middle_ok & ~wrong_time).reindex(range(len(g)), fill_value=False).to_numpy(bool)
 
 
+def classify(best_share, covered, not_seen, survived_share=SURVIVED_SHARE, gone_cover=GONE_COVER):
+    """The status of buildings before, from their evidence (arrays): not_seen where a lidar didn't
+    see the spot; else survived where the best pair shares at least ``survived_share`` of each of
+    the two; else gone where buildings after cover less than ``gone_cover`` of it; else unsure.
+    The thresholds are arguments so that a check against damage data can try others."""
+    return np.select([not_seen, best_share >= survived_share, covered < gone_cover],
+                     ["not_seen", "survived", "gone"], "unsure")
+
+
 def unseen(rows):
     """True where a lidar didn't see the spot: seen_pre or seen_post False (NA counts as seen)."""
     return ((rows["seen_pre"] == False) | (rows["seen_post"] == False)).fillna(False).to_numpy(bool)  # noqa: E712
@@ -241,8 +253,7 @@ def predictions(pre, post, p, height=None):
         rows["height_pre"] = pre[height].to_numpy(float)
         rows["height_post"] = np.where(has, post[height].to_numpy(float)[np.maximum(best_post, 0)], np.nan)
         rows["height_change"] = rows["height_post"] - rows["height_pre"]
-    rows["status"] = np.select([unseen(rows), rows["best_share"] >= SURVIVED_SHARE,
-                                rows["covered"] < GONE_COVER], ["not_seen", "survived", "gone"], "unsure")
+    rows["status"] = classify(rows["best_share"].to_numpy(), rows["covered"].to_numpy(), unseen(rows))
     rows = gpd.GeoDataFrame(rows, geometry=pre.geometry.to_numpy(), crs=pre.crs)
 
     # The buildings after with no pair: new, unless a lidar didn't see the spot (the lidar before
@@ -290,8 +301,8 @@ def write_readme(path, argv, a, pre, post, shift, counts, height, id_from):
     text = f"""# Before and after: {Path(a.out).name}
 
 Made {datetime.datetime.now():%Y-%m-%d %H:%M} with `src/change.py` from
-<https://github.com/kulpojke/detection>, code version {git_version()}. A first, automatic result: the
-thresholds are first guesses, not yet chosen against damage data (see Limits).
+<https://github.com/kulpojke/detection>, code version {git_version()}. An automatic result; see
+Limits for what its thresholds rest on.
 
     {shlex.join(['python', 'src/change.py', *argv])}
 
@@ -351,8 +362,9 @@ cell without points doesn't count against it (the maps cover only the squares th
 """ if height else "") + f"""
 ## Limits
 
-- **The thresholds are first guesses:** `SURVIVED_SHARE` {SURVIVED_SHARE:g} and `GONE_COVER` {GONE_COVER:g}
-  in `src/change.py`. They are to be chosen against damage data in a test area, and scored outside it.
+- **The thresholds** (`SURVIVED_SHARE` {SURVIVED_SHARE:g}, `GONE_COVER` {GONE_COVER:g} in `src/change.py`)
+  were chosen against CAL FIRE's damage points in one test box (central Paradise, 2018 Camp Fire),
+  where they mattered little. On another event, check them against its damage data.
 - **Survived means a building of about the same outline stands there after,** not that it is
   undamaged: a damaged building that still stands can be survived.
 - **`new` is not always a building:** a detector run on post-event lidar finds trailers, debris

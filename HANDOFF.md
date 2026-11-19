@@ -21,9 +21,11 @@ script (`--exec ./my_tool.sh`). **Buildings are not classified in WA_NorthEast_2
 building logic goes into it.
 
 ## Status (2026-11-10)
-- **Before and after (2026-11-19, Michael's request): `src/change.py`, in progress.** It matches
+- **Before and after (2026-11-19, Michael's request): `src/change.py` and `src/score.py`.** It matches
   post-event footprints to pre-event ones, so a building that survived keeps its pre-fire
-  footprint and ID. See "Before and after".
+  footprint and ID. Test box: balanced 0.96 against DINS (homes 0.98-1.00). Next: the
+  post-fire run over the whole perimeter (started 2026-11-19), then the held-out score. See
+  "Before and after", its "Next" list.
 - **Camp Fire, pre-fire buildings (2026-11-10, Michael's request, for someone else):**
   `src/detect.py` ran buildings.py over the whole fire perimeter from both pre-fire sets
   (`runs/camp_fire_prefire/`, git-ignored; its `README.md` says where everything came from).
@@ -44,8 +46,8 @@ building logic goes into it.
   geometry-only step (`square_up`, `outline` 6; see "`outline` codes" under Building
   detection). In the Camp Fire run 70% of the buildings weren't straightened (small, or
   tree-bitten); in the rerun (`runs2/`) 18,051 buildings got `outline` 6.
-- **Offline suite: 98 passed** (10 network tests skipped), in about 15 s (2026-11-19: 83 + 15
-  for change.py). One harmless warning: after a test that reads or writes a file with geopandas,
+- **Offline suite: 105 passed** (10 network tests skipped), in about 15 s (2026-11-19: 83 + 15 + 7
+  for change.py and score.py). One harmless warning: after a test that reads or writes a file with geopandas,
   pyogrio routes GDAL's messages into Python warnings, so GEOS's "Self-intersection at ..." in
   `test_refine_walls`'s `IsValid()` shows up.
 - **The network suite runs in CI on every push** (see Tests). The first run (2026-11-05,
@@ -721,13 +723,94 @@ buildings after: 31 lie where B4 was flown only on 2019-08-09 (the ring's southw
 which would otherwise be false "new". 4 buildings before have their middle in a square that
 wasn't run.
 
-**Next:**
-- **Step 4, the DINS check in the test box:** choose `SURVIVED_SHARE` and `GONE_COVER` (and
-  whether `height_change` belongs in the rule), scored three ways (gone ↔ Destroyed; ↔
-  Destroyed + Major; Major left out). The scoring code holds DINS, so it stays outside
-  change.py.
-- Then the whole perimeter (Michael's run, hours), the scores outside the test box, and the
-  western Paradise footprints on the QAQC side.
+**Step 4, the DINS check: `src/score.py`** (outside change.py: the check, not the model; it
+calls `change.classify`, so it scores exactly the model's rule).
+1. **Link:** each DINS point to the building before it lies in, or the nearest within
+   `LINK_DISTANCE` 2 m. In the box 645 of 945 lie inside one and 724 within 2 m. DINS points
+   sit typically 3.9 m from their building's centre; 5 m would add 42 (36 Destroyed) but starts
+   to reach neighbours. The 221 not linked (191 Destroyed) are structures the lidar before
+   missed (many "Utility Misc Structure"), or points at the street; they are counted, not
+   scored.
+   - DINS doesn't carry the lidar's datum shift: inside buildings, point minus centre has a
+     median of +1.39 m east, −1.67 m north, an inspectors' habit, not −1.4 / +0.27.
+2. **Truth, three ways** (`WAYS`): gone ↔ Destroyed (Major standing); ↔ Destroyed + Major;
+   Major left out.
+3. **Score:** the table of truth by status, and per class. not_seen is counted, not scored.
+   `--by COLUMN` scores each value of a DINS column apart.
+4. **Sweep:** `SURVIVED_SHARE` 0.3-0.7 × `GONE_COVER` 0.05-0.3, from the evidence columns.
+
+`--out` writes the linked points with their truth and status (`score_points.gpkg`, for QGIS):
+
+    python src/score.py runs2/camp_fire_postfire_test/change.gpkg \
+        --points ../damagemap-qaqc/tmp/camp_fire_qaqc.dins.revision-64.parquet \
+        --box 618000 4401000 619500 4402500 --by STRUCTURECATEGORY --out runs2/camp_fire_postfire_test/score_points.gpkg
+
+(The DINS file is the app's export, revision 64. Reviewers can move DINS points; one had been
+moved then.)
+
+**Results in the test box** (first-guess thresholds 0.5 / 0.1; the box has 1 Major, so the
+three ways are the same here):
+- **Balanced 0.95.** Destroyed → gone 0.94 (482 of 511), standing → survived 0.96 (204 of
+  213). Of the gone, 0.99 are Destroyed; of the survived, 0.94 standing; 3% unsure.
+- **By structure category:** Single Residence 0.98 (277 / 33), Multiple Residence 1.00
+  (60 / 59), Nonresidential Commercial 0.90 (118 / 110), Other Minor Structure 0.82 (55 / 9).
+  **Homes are nearly perfect; the mistakes are commercial buildings, schools and small
+  structures.**
+- **The mistakes:**
+  - **13 destroyed → survived:** none of them a house, all with high shares (0.6-0.98). Most
+    likely a DINS point of another structure on the same lot or campus (a portable, a shop
+    unit), on a building that stood. No threshold fixes these.
+  - **5 standing → gone:** 3 school buildings of 89-117 m² (portables?) and 2 small
+    structures, with nothing there in 2019: probably removed in the cleanup. **Gone means gone,
+    not burned.**
+  - **16 destroyed → unsure:** big commercial and school buildings found in 3-5 pieces after
+    the fire. Several buildings hold more than one DINS point, so they count more than once.
+- **Height change** of survived buildings: median +0.02 m where DINS says standing, −0.15 m
+  where it says Destroyed. A weak signal; not in the rule.
+- **Sweep:** balanced 0.92-0.97 over the whole grid; the best (0.968) at 0.3 or 0.4 with
+  0.3. The differences are a few points of 213 standing (3 points = 1.4%), so the thresholds
+  matter little here.
+- **Chosen (Michael, 2026-11-19): `SURVIVED_SHARE` 0.5, `GONE_COVER` 0.1 → 0.2.** In the box:
+  destroyed → gone 0.95 (488 of 511, 6 more), standing → survived 0.96 (unchanged), gone that
+  is destroyed 0.99, survived that is standing 0.94, unsure 2%, **balanced 0.96**; Single
+  Residence 0.98, Multiple 1.00, Commercial 0.91, Other Minor 0.83. Lowering `SURVIVED_SHARE`
+  would gain 3 standing points for about 2 more destroyed → survived: not worth it.
+
+**Next (in this order):**
+1. **Michael's run, started 2026-11-19:** detect.py on the 2019 lidar over the whole perimeter,
+   the same 500 m squares as the pre-fire run (hours):
+
+       PYTHONNOUSERSITE=1 ~/miniforge3/envs/tilestream/bin/python src/detect.py runs2/camp_fire_postfire \
+           --ept USGS_LPC_CA_NoCal_Wildfires_CampFire_2018 \
+           --area runs2/camp_fire_prefire/inputs/camp_perimeter.geojson --jobs 12
+
+   Check that it finished: `runs2/camp_fire_postfire/README.md` and `buildings.gpkg`, and
+   `logs/` for failed squares (rerunning the same command resumes).
+2. **change.py over everything** (seconds to a minute):
+
+       python src/change.py runs2/camp_fire_postfire/change.gpkg --pre runs2/camp_fire_prefire/buildings.gpkg \
+           --post runs2/camp_fire_postfire/buildings.gpkg --pre-flown runs2/camp_fire_prefire/flown/*.tif \
+           --post-flown runs2/camp_fire_postfire/flown/*.tif --event 2018-11-08
+
+   Check that the shift is still about 1.36 m west, 0.23 m north, and whether it varies over
+   the area (B4 vs PlumasNF B2 before; the first look measured it per 500 m square). Western
+   Paradise should come out not_seen, not new.
+3. **The held-out score:** `score.py` needs an option that leaves the test box out (e.g.
+   `--exclude-box`, the points outside it; not written yet), then:
+
+       python src/score.py runs2/camp_fire_postfire/change.gpkg \
+           --points ../damagemap-qaqc/tmp/camp_fire_qaqc.dins.revision-64.parquet \
+           --exclude-box 618000 4401000 619500 4402500 --by STRUCTURECATEGORY \
+           --out runs2/camp_fire_postfire/score_points.gpkg
+
+   Report the three ways (they will differ outside the box: it had 1 Major), per category.
+   Don't change the thresholds on these numbers: that would make the held-out score a tuning
+   score again.
+4. **Western Paradise footprints (the DINS hack), on the QAQC side** (damagemap-qaqc/data), kept
+   apart from the model; see "Two processes" above.
+5. Small, any time: detect.py's `--bbox` grows on its way through lon/lat and picks up the
+   ring of neighbouring squares (`plan_squares`); a project README for the repository (Michael
+   wants one once before/after is done).
 
 ## Tests
 Run from the project root, inside a memory cap:
@@ -830,10 +913,11 @@ that is still going. The offline tests don't run in CI yet. The first run (2026-
   (`naip_2018/`, 35 tiles as they are, `tiles.json`, `naip_2018.vrt`), the STAC search results.
 - `test/conftest.py`: the `--ept` option and the `site` fixture.
 - `src/change.py`: before and after, pre- vs post-event footprints (see "Before and after").
+- `src/score.py`: the check of change.py against damage points (CAL FIRE DINS); not part of the model.
 - `runs2/camp_fire_postfire_test/` (git-ignored): detect.py on the 2019 lidar
   (`USGS_LPC_CA_NoCal_Wildfires_CampFire_2018`) over the test box, and `change.gpkg` with
   `change_README.md`.
-- `test/test_tilestream.py`, `test/test_change.py`, `test/test_ept.py`: the tests.
+- `test/test_tilestream.py`, `test/test_change.py`, `test/test_score.py`, `test/test_ept.py`: the tests.
 - `test/README.md`: what each test checks.
 - `pyproject.toml`: pytest config (pythonpath `src`, `network` marker).
 - `environment.yml`: the conda env, with pinned versions.

@@ -380,6 +380,20 @@ left and right halves.
   after without the last column of houses: 50 survived, 8 not seen, 6 gone, 1 new; the three
   layers, and the README beside them (the shift in words, the counts, where the IDs came from).
 
+## test_score.py (offline)
+
+`score.py` checks change.py's predictions against damage points (CAL FIRE DINS).
+- `test_truth_three_ways`: the DINS classes as destroyed / standing / left out, for each of the
+  three ways; a class no way knows ("Inaccessible") is left out.
+- `test_link_inside_near_and_far`: a point inside a building, one 1.5 m away (linked), one
+  5 m away (not: `LINK_DISTANCE` is 2 m).
+- `test_score_counts_each_class_apart`: the table and the per-class numbers on a hand-made
+  case; a point without truth is left out.
+- `test_score_leaves_not_seen_out_of_the_shares`: not_seen is counted, not scored.
+- `test_the_sweep_uses_change_pys_own_rule`: at change.py's thresholds, `statuses_for` gives
+  back exactly change.py's statuses (it calls `change.classify`), and other thresholds change
+  them.
+
 ## test_ept.py (network, real data)
 
 - `test_info`: the EPT's metadata: it has points, X/Y/Z fields and a sensible footprint,
